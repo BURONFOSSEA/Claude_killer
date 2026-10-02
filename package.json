@@ -1,5 +1,5 @@
 {
-  "name": "killer-game",
+  "name": "claude-killer",
   "version": "1.0.0",
   "description": "Application web pour organiser des parties de Killer, avec assistance IA (Claude).",
   "type": "module",

@@ -1,4 +1,4 @@
-# 🎯 Killer Game — application web
+# 🎯 Claude_killer — application web de Killer
 
 Application pour organiser des parties de **Killer** : chaque joueur reçoit secrètement une cible et un défi.
 Pour « tuer » sa cible, il doit lui faire réaliser le défi sans qu'elle s'en rende compte. La victime transmet
@@ -9,7 +9,7 @@ alors sa cible et son défi à son tueur… jusqu'au dernier survivant.
 Prérequis : **Node.js 22.13 ou plus récent** (la base SQLite est intégrée à Node, rien d'autre à installer).
 
 ```bash
-cd app
+cd Claude_killer
 npm install
 cp .env.example .env      # puis renseignez ADMIN_PASSWORD (et ANTHROPIC_API_KEY pour l'IA)
 npm start                 # http://localhost:3000
@@ -68,7 +68,7 @@ npm test
 ## Structure
 
 ```
-app/
+Claude_killer/
 ├── server.js               # API Express + pages statiques
 ├── src/
 │   ├── db.js               # schéma SQLite
