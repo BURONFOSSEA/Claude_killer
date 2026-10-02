@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0f0f12">
+  <meta name="robots" content="noindex">
+  <title>Killer · Organisateur</title>
+  <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+  <main id="login" class="hero hidden">
+    <form id="loginForm" class="card">
+      <h1>KILL<span>ER</span></h1>
+      <p class="dim">Espace organisateur</p>
+      <div class="field">
+        <label for="username">Identifiant</label>
+        <input id="username" autocomplete="username" required>
+      </div>
+      <div class="field">
+        <label for="password">Mot de passe</label>
+        <input id="password" type="password" autocomplete="current-password" required>
+      </div>
+      <button class="primary block big" type="submit">Se connecter</button>
+      <p class="small dim mt"><a href="/">← Accueil</a></p>
+    </form>
+  </main>
+
+  <div id="app" class="hidden">
+    <header class="topbar">
+      <a class="brand" href="#">KILL<span>ER</span> <span class="small dim">admin</span></a>
+      <div class="actions">
+        <button class="ghost sm" data-action="go-home" type="button">Mes parties</button>
+        <button class="ghost sm" data-action="password" type="button">Mot de passe</button>
+        <button class="ghost sm" data-action="logout" type="button">Déconnexion</button>
+      </div>
+    </header>
+    <main class="wrap" id="view"></main>
+  </div>
+
+  <script type="module" src="/js/admin.js"></script>
+</body>
+</html>
