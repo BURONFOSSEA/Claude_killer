@@ -494,7 +494,8 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     db,
     notifier,
     secureCookies: process.env.COOKIE_SECURE === 'true',
-    publicUrl: (process.env.PUBLIC_URL || '').replace(/\/$/, ''),
+    // RENDER_EXTERNAL_URL est fourni automatiquement par Render.
+    publicUrl: (process.env.PUBLIC_URL || process.env.RENDER_EXTERNAL_URL || '').replace(/\/$/, ''),
   });
   app.listen(port, () => {
     console.log(`Killer Game prêt sur http://localhost:${port}`);
