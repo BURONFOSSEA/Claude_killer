@@ -12,18 +12,18 @@ self.addEventListener('push', (event) => {
   event.waitUntil(
     self.registration.showNotification(data.title || 'Killer', {
       body: data.body || 'Du nouveau dans la partie.',
-      icon: '/icons/icon-192.png',
-      badge: '/icons/icon-192.png',
+      icon: 'icons/icon-192.png',
+      badge: 'icons/icon-192.png',
       tag: data.tag,
       renotify: true,
-      data: { url: data.url || '/jouer' },
+      data: { url: data.url || 'player.html' },
     }),
   );
 });
 
 self.addEventListener('notificationclick', (event) => {
   event.notification.close();
-  const url = new URL(event.notification.data?.url || '/jouer', self.location.origin).href;
+  const url = new URL(event.notification.data?.url || 'player.html', self.registration.scope).href;
   event.waitUntil(
     self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((wins) => {
       const open = wins.find((w) => new URL(w.url).pathname === new URL(url).pathname);

@@ -1,22 +1,24 @@
 {
   "name": "claude-killer",
   "version": "1.0.0",
-  "description": "Application web pour organiser des parties de Killer, avec assistance IA (Claude).",
+  "description": "Application web pour organiser des parties de Killer (GitHub Pages + Supabase), avec assistance IA (Claude).",
   "type": "module",
-  "main": "server.js",
   "private": true,
   "engines": {
     "node": ">=22.13"
   },
   "scripts": {
-    "start": "node --env-file-if-exists=.env --disable-warning=ExperimentalWarning server.js",
-    "dev": "node --env-file-if-exists=.env --disable-warning=ExperimentalWarning --watch server.js",
-    "test": "node --disable-warning=ExperimentalWarning --test \"test/*.test.js\""
+    "dev": "node --env-file-if-exists=.env dev/server.js",
+    "test": "node --test \"test/*.test.js\"",
+    "check:deno": "deno check supabase/functions/api/index.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.131.0",
-    "express": "^5.2.1",
-    "nodemailer": "^10.0.13",
     "web-push": "^3.6.7"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "^0.5.8",
+    "@electric-sql/pglite-socket": "^0.2.11",
+    "postgres": "^3.4.9"
   }
 }

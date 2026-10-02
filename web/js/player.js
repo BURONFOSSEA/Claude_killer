@@ -5,7 +5,7 @@ let revealed = false; // la cible reste masquée tant que le joueur ne tape pas 
 let pollTimer = null;
 
 async function boot() {
-  // Lien direct /jouer#CODE fourni par l'organisateur : connexion automatique.
+  // Lien direct player.html#CODE fourni par l'organisateur : connexion automatique.
   const hashCode = decodeURIComponent(location.hash.slice(1));
   if (hashCode) {
     history.replaceState(null, '', location.pathname);
@@ -299,7 +299,7 @@ let notif = null; // { email, push_key, mail_enabled }
 let deviceSubscribed = false;
 
 async function registration() {
-  return navigator.serviceWorker.register('/sw.js');
+  return navigator.serviceWorker.register('sw.js');
 }
 
 async function loadNotifications() {

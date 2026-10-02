@@ -1,0 +1,5 @@
+# Configuration minimale pour le déploiement de l'Edge Function.
+project_id = "claude-killer"
+
+[functions.api]
+verify_jwt = false

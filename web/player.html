@@ -6,11 +6,11 @@
   <meta name="theme-color" content="#0f0f12">
   <meta name="robots" content="noindex">
   <title>Killer · Joueur</title>
-  <link rel="manifest" href="/manifest.webmanifest">
-  <link rel="icon" href="/icons/icon-192.png">
-  <link rel="apple-touch-icon" href="/icons/icon-192.png">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icons/icon-192.png">
+  <link rel="apple-touch-icon" href="icons/icon-192.png">
   <meta name="apple-mobile-web-app-capable" content="yes">
-  <link rel="stylesheet" href="/css/style.css">
+  <link rel="stylesheet" href="css/style.css">
 </head>
 <body>
   <!-- Connexion -->
@@ -23,14 +23,14 @@
         <input id="code" class="code-input" autocomplete="off" autocapitalize="characters" spellcheck="false" maxlength="12" placeholder="XXXXXX" required>
       </div>
       <button class="primary block big" type="submit">Entrer</button>
-      <p class="small dim mt"><a href="/">← Accueil</a></p>
+      <p class="small dim mt"><a href="./">← Accueil</a></p>
     </form>
   </main>
 
   <!-- Tableau de bord joueur -->
   <div id="app" class="hidden">
     <header class="topbar">
-      <a class="brand" href="/jouer">KILL<span>ER</span></a>
+      <a class="brand" href="player.html">KILL<span>ER</span></a>
       <div class="actions">
         <button id="refreshBtn" class="ghost sm" type="button" aria-label="Rafraîchir">↻</button>
         <button id="logoutBtn" class="ghost sm" type="button">Déconnexion</button>
@@ -40,6 +40,7 @@
     <section class="wrap narrow pt-0" id="notif"></section>
   </div>
 
-  <script type="module" src="/js/player.js"></script>
+  <script src="config.js"></script>
+  <script type="module" src="js/player.js"></script>
 </body>
 </html>

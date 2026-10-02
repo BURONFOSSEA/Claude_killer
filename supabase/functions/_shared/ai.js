@@ -4,14 +4,18 @@ import Anthropic from '@anthropic-ai/sdk';
 import { CHALLENGE_LIBRARY } from './challenge-library.js';
 import { buildRandomPlan, planFromOrder, shuffle, pickChallenges } from './game.js';
 
-const MODEL = process.env.ANTHROPIC_MODEL || 'claude-opus-5-5';
-
+// Configuration lue une fois au démarrage (variables d'environnement / secrets Supabase).
+let config = { apiKey: '', model: 'claude-opus-5-5' };
 let client = null;
+export function configureAi(env = {}) {
+  config = { apiKey: env.ANTHROPIC_API_KEY || '', model: env.ANTHROPIC_MODEL || 'claude-opus-5-5' };
+  client = null;
+}
 export function aiEnabled() {
-  return Boolean(process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN);
+  return Boolean(config.apiKey);
 }
 function getClient() {
-  if (!client) client = new Anthropic();
+  if (!client) client = new Anthropic({ apiKey: config.apiKey });
   return client;
 }
 
@@ -27,7 +31,7 @@ async function askJson(prompt, schema) {
   // Fallbacks serveur : si une requête est refusée par un filtre de sécurité, l'API la rejoue
   // automatiquement sur un modèle de repli.
   const response = await getClient().beta.messages.create({
-    model: MODEL,
+    model: config.model,
     max_tokens: 16000,
     betas: ['server-side-fallback-2026-07-01'],
     fallbacks: 'default',

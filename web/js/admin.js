@@ -184,7 +184,9 @@ function headerStats() {
 
 const tabEl = () => $('#tab');
 const playerName = (id) => current.players.find((p) => p.id === id)?.name ?? '?';
-const playerLink = (code) => `${location.origin}/jouer#${code}`;
+// Adresse de la page joueur, quel que soit l'endroit où le site est hébergé (ex. GitHub Pages /Claude_killer/).
+const playerPage = () => new URL('player.html', location.href).href;
+const playerLink = (code) => `${playerPage()}#${code}`;
 
 // ---------------------------------------------------------------- onglet joueurs
 
@@ -208,7 +210,7 @@ function renderPlayers() {
         <h2 class="mb-0">Liste des joueurs</h2>
         ${players.length ? '<button class="sm" data-action="print-codes">🖨️ Imprimer les codes</button>' : ''}
       </div>
-      <p class="small dim">Chaque joueur se connecte sur <strong>${esc(location.origin)}/jouer</strong> avec son code personnel, ou via son lien direct.</p>
+      <p class="small dim">Chaque joueur se connecte sur <strong>${esc(playerPage())}</strong> avec son code personnel, ou via son lien direct.</p>
       <div class="table-wrap">
         <table>
           <thead><tr><th>Nom</th><th>E-mail</th><th>Infos (privées)</th><th>Code</th>${draft ? '' : '<th>Statut</th><th>Kills</th>'}<th></th></tr></thead>
@@ -275,7 +277,7 @@ function printableCodes() {
   return `
     <section class="print-only">
       <h2>${esc(current.game.name)} — codes joueurs</h2>
-      <p>Connexion : ${esc(location.origin)}/jouer</p>
+      <p>Connexion : ${esc(playerPage())}</p>
       <div class="code-cards">
         ${current.players
           .map((p) => `<div class="code-card"><strong>${esc(p.name)}</strong><div class="mono">${esc(p.code)}</div><div class="small">${esc(playerLink(p.code))}</div></div>`)

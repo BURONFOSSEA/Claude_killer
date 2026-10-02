@@ -1,18 +1,46 @@
 // Utilitaires partagés par les pages admin et joueur.
 
+// Appel à l'API du jeu (Edge Function Supabase, ou /api en local).
+// La session est un jeton conservé dans le navigateur (un pour l'admin, un pour le joueur),
+// envoyé dans l'en-tête x-killer-token : les cookies ne fonctionnent pas entre github.io et supabase.co.
+const API_URL = (window.KILLER_CONFIG?.apiUrl || '/api').replace(/\/$/, '');
+const tokenKey = (path) => (path.startsWith('/api/admin') ? 'killer_admin_token' : 'killer_player_token');
+
+function storage(action, key, value) {
+  try {
+    if (action === 'get') return localStorage.getItem(key);
+    if (action === 'set') localStorage.setItem(key, value);
+    if (action === 'remove') localStorage.removeItem(key);
+  } catch {
+    /* stockage indisponible (navigation privée stricte) */
+  }
+  return null;
+}
+
 export async function api(path, { method = 'GET', body } = {}) {
-  const res = await fetch(path, {
-    method,
-    headers: method === 'GET' ? {} : { 'Content-Type': 'application/json' },
-    body: method === 'GET' ? undefined : JSON.stringify(body ?? {}),
-    credentials: 'same-origin',
-  });
+  const key = tokenKey(path);
+  const token = storage('get', key);
+  const headers = {};
+  if (method !== 'GET') headers['Content-Type'] = 'application/json';
+  if (token) headers['x-killer-token'] = token;
+  let res;
+  try {
+    res = await fetch(API_URL + path.replace(/^\/api/, ''), {
+      method,
+      headers,
+      body: method === 'GET' ? undefined : JSON.stringify(body ?? {}),
+    });
+  } catch {
+    throw new Error('Serveur injoignable. Vérifie ta connexion et réessaie.');
+  }
   let data = null;
   try {
     data = await res.json();
   } catch {
     /* réponse vide */
   }
+  if (data?.token) storage('set', key, data.token);
+  if (path.endsWith('/logout') || res.status === 401) storage('remove', key);
   if (!res.ok) {
     const err = new Error(data?.error || `Erreur ${res.status}`);
     err.status = res.status;

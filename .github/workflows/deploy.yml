@@ -1,0 +1,76 @@
+# Déploiement automatique à chaque push sur main :
+#  1. la fonction serveur sur Supabase (Edge Function "api") ;
+#  2. le site sur GitHub Pages.
+# Secrets à créer dans GitHub (Settings → Secrets and variables → Actions) : voir README.
+name: Déploiement
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+jobs:
+  supabase:
+    name: Fonction Supabase
+    runs-on: ubuntu-latest
+    env:
+      SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+      PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: supabase/setup-cli@v1
+        with:
+          version: latest
+      - name: Vérifier la configuration
+        env:
+          ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD }}
+        run: |
+          missing=""
+          [ -n "$SUPABASE_ACCESS_TOKEN" ] || missing="$missing SUPABASE_ACCESS_TOKEN"
+          [ -n "$PROJECT_REF" ] || missing="$missing SUPABASE_PROJECT_REF"
+          [ -n "$ADMIN_PASSWORD" ] || missing="$missing ADMIN_PASSWORD"
+          if [ -n "$missing" ]; then echo "::error::Secrets GitHub manquants :$missing (voir README)"; exit 1; fi
+      - name: Transmettre la configuration à Supabase
+        env:
+          ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          BREVO_API_KEY: ${{ secrets.BREVO_API_KEY }}
+          MAIL_FROM: ${{ secrets.MAIL_FROM }}
+          REPO_NAME: ${{ github.event.repository.name }}
+        run: |
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          args=("ADMIN_PASSWORD=$ADMIN_PASSWORD" "SITE_URL=https://$owner.github.io/$REPO_NAME")
+          [ -n "$ANTHROPIC_API_KEY" ] && args+=("ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY")
+          [ -n "$BREVO_API_KEY" ] && args+=("BREVO_API_KEY=$BREVO_API_KEY")
+          [ -n "$MAIL_FROM" ] && args+=("MAIL_FROM=$MAIL_FROM")
+          supabase secrets set --project-ref "$PROJECT_REF" "${args[@]}"
+      - name: Déployer la fonction
+        run: supabase functions deploy api --project-ref "$PROJECT_REF" --no-verify-jwt --use-api
+
+  pages:
+    name: Site GitHub Pages
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pointer le site vers la fonction Supabase
+        env:
+          PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
+        run: echo "window.KILLER_CONFIG = { apiUrl: 'https://$PROJECT_REF.supabase.co/functions/v1/api' };" > web/config.js
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: web
+      - id: deployment
+        uses: actions/deploy-pages@v4

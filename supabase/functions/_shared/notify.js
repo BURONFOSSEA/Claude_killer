@@ -1,8 +1,7 @@
-// Notifications des joueurs : push navigateur (Web Push) et e-mail (SMTP).
+// Notifications des joueurs : push navigateur (Web Push) et e-mail (API Brevo).
 // Les messages ne contiennent jamais le nom de la cible ni le défi : un écran verrouillé
 // ou une boîte mail partagée ne doit rien révéler. Le joueur ouvre l'appli pour voir les détails.
 import webpush from 'web-push';
-import nodemailer from 'nodemailer';
 import { getSetting, setSetting } from './db.js';
 
 const MESSAGES = {
@@ -39,7 +38,7 @@ const MESSAGES = {
     body: "Merci d'avoir joué ! Chut… ne révèle rien aux survivants.",
   }),
   you_were_removed: () => ({
-    title: "Tu as été retiré de la partie",
+    title: 'Tu as été retiré de la partie',
     body: "L'organisateur t'a retiré de la partie.",
   }),
   game_finished: (ctx) => ({
@@ -71,41 +70,46 @@ function emailHtml({ title, body, url, playerName }) {
       <a href="${esc(url)}" style="display:inline-block;background:#e5383b;color:#fff;text-decoration:none;font-weight:bold;padding:12px 20px;border-radius:10px">Ouvrir le jeu</a>
     </div>
     <p style="font-size:12px;color:#a2a2ad;margin-top:16px">Tu reçois ce message parce que tu participes à une partie de Killer.
-    Pour ne plus recevoir d'e-mails, efface ton adresse dans l'onglet notifications de l'appli.</p>
+    Pour ne plus recevoir d'e-mails, efface ton adresse dans l'appli.</p>
   </div></body></html>`;
 }
 
 // ---------- Transports ----------
 
-export function createMailerFromEnv(env = process.env) {
-  if (!env.SMTP_HOST) return null;
-  const port = Number(env.SMTP_PORT) || 587;
-  const transporter = nodemailer.createTransport({
-    host: env.SMTP_HOST,
-    port,
-    secure: env.SMTP_SECURE ? env.SMTP_SECURE === 'true' : port === 465,
-    auth: env.SMTP_USER ? { user: env.SMTP_USER, pass: env.SMTP_PASS } : undefined,
-  });
-  const from = env.MAIL_FROM || env.SMTP_USER;
-  return { send: (mail) => transporter.sendMail({ from, ...mail }) };
+// E-mails via l'API HTTP de Brevo (gratuit : 300 e-mails/jour). Les Edge Functions Supabase
+// bloquent le SMTP classique, d'où l'utilisation d'une API HTTP.
+export function createBrevoMailer(env = {}, fetchImpl = fetch) {
+  if (!env.BREVO_API_KEY || !env.MAIL_FROM) return null;
+  // MAIL_FROM : "adresse@exemple.fr" ou "Nom <adresse@exemple.fr>"
+  const m = /^\s*(?:(.*?)\s*<([^>]+)>|([^<>\s]+))\s*$/.exec(env.MAIL_FROM);
+  const sender = m ? { email: (m[2] || m[3]).trim(), name: (m[1] || 'Killer').trim() || 'Killer' } : { email: env.MAIL_FROM, name: 'Killer' };
+  return {
+    async send({ to, toName, subject, text, html }) {
+      const res = await fetchImpl('https://api.brevo.com/v3/smtp/email', {
+        method: 'POST',
+        headers: { 'api-key': env.BREVO_API_KEY, 'content-type': 'application/json', accept: 'application/json' },
+        body: JSON.stringify({ sender, to: [{ email: to, name: toName }], subject, textContent: text, htmlContent: html }),
+      });
+      if (!res.ok) throw new Error(`Brevo ${res.status} : ${(await res.text()).slice(0, 200)}`);
+    },
+  };
 }
 
 // Clés VAPID : prises dans l'environnement, sinon générées une fois et conservées en base.
-export function createPushFromEnv(db, env = process.env) {
+export async function createPush(db, env = {}) {
   let publicKey = env.VAPID_PUBLIC_KEY;
   let privateKey = env.VAPID_PRIVATE_KEY;
   if (!publicKey || !privateKey) {
-    publicKey = getSetting(db, 'vapid_public_key');
-    privateKey = getSetting(db, 'vapid_private_key');
+    publicKey = await getSetting(db, 'vapid_public_key');
+    privateKey = await getSetting(db, 'vapid_private_key');
     if (!publicKey || !privateKey) {
       ({ publicKey, privateKey } = webpush.generateVAPIDKeys());
-      setSetting(db, 'vapid_public_key', publicKey);
-      setSetting(db, 'vapid_private_key', privateKey);
+      await setSetting(db, 'vapid_public_key', publicKey);
+      await setSetting(db, 'vapid_private_key', privateKey);
     }
   }
   const subject =
-    env.VAPID_SUBJECT ||
-    (env.PUBLIC_URL?.startsWith('https://') ? env.PUBLIC_URL : `mailto:${env.MAIL_FROM || 'killer@example.com'}`);
+    env.VAPID_SUBJECT || (env.SITE_URL?.startsWith('https://') ? env.SITE_URL : 'mailto:killer@example.com');
   const vapidDetails = { subject, publicKey, privateKey };
   return {
     publicKey,
@@ -116,60 +120,54 @@ export function createPushFromEnv(db, env = process.env) {
 // ---------- Distribution ----------
 
 export function createNotifier({ db, mailer = null, push = null, logger = console }) {
-  const playerStmt = db.prepare('SELECT id, name, email FROM players WHERE id = ?');
-  const subsStmt = db.prepare('SELECT * FROM push_subscriptions WHERE player_id = ?');
-  const dropSub = db.prepare('DELETE FROM push_subscriptions WHERE id = ?');
+  const player = (id) => db.one('SELECT id, name, email FROM players WHERE id = $1', [id]);
 
-  async function sendPush(player, msg, url) {
+  async function sendPush(p, msg, url) {
     if (!push) return;
-    const payload = JSON.stringify({ title: msg.title, body: msg.body, url, tag: `killer-${player.id}` });
-    for (const sub of subsStmt.all(player.id)) {
+    const payload = JSON.stringify({ title: msg.title, body: msg.body, url, tag: `killer-${p.id}` });
+    for (const sub of await db.query('SELECT * FROM push_subscriptions WHERE player_id = $1', [p.id])) {
       try {
         await push.send({ endpoint: sub.endpoint, keys: JSON.parse(sub.keys_json) }, payload);
       } catch (err) {
         // 404/410 : abonnement expiré ou révoqué par le navigateur → on l'oublie.
-        if (err.statusCode === 404 || err.statusCode === 410) dropSub.run(sub.id);
-        else logger.error(`[push] joueur ${player.id} :`, err.message);
+        if (err.statusCode === 404 || err.statusCode === 410) await db.query('DELETE FROM push_subscriptions WHERE id = $1', [sub.id]);
+        else logger.error(`[push] joueur ${p.id} :`, err.message);
       }
     }
   }
 
-  async function sendMail(player, msg, url) {
-    if (!mailer || !player.email) return;
+  async function sendMail(p, msg, url) {
+    if (!mailer || !p.email) return;
     try {
       await mailer.send({
-        to: player.email,
+        to: p.email,
+        toName: p.name,
         subject: msg.title,
-        text: `Salut ${player.name},\n\n${msg.body}\n\nOuvrir le jeu : ${url}`,
-        html: emailHtml({ ...msg, url, playerName: player.name }),
+        text: `Salut ${p.name},\n\n${msg.body}\n\nOuvrir le jeu : ${url}`,
+        html: emailHtml({ ...msg, url, playerName: p.name }),
       });
     } catch (err) {
-      logger.error(`[mail] joueur ${player.id} :`, err.message);
+      logger.error(`[mail] joueur ${p.id} :`, err.message);
     }
   }
 
-  // N'attend pas forcément la fin : les routes appellent dispatch() sans bloquer la réponse.
-  async function dispatch(events = [], { baseUrl = '' } = {}) {
-    const url = `${baseUrl}/jouer`;
+  async function dispatch(events = [], { siteUrl = '' } = {}) {
+    const url = `${siteUrl.replace(/\/$/, '')}/player.html`;
     const jobs = [];
     for (const evt of events) {
-      const game = db.prepare('SELECT name, winner_id FROM games WHERE id = ?').get(evt.gameId);
+      const game = await db.one('SELECT name FROM games WHERE id = $1', [evt.gameId]);
       if (!game) continue;
-      const winner = evt.data?.winnerId ? playerStmt.get(evt.data.winnerId)?.name : null;
+      const winner = evt.data?.winnerId ? (await player(evt.data.winnerId))?.name : null;
       for (const playerId of evt.to) {
-        const player = playerStmt.get(playerId);
-        if (!player) continue;
+        const p = await player(playerId);
+        if (!p) continue;
         const msg = messageFor(evt, { game: game.name, winner, isWinner: evt.data?.winnerId === playerId });
         if (!msg) continue;
-        jobs.push(sendPush(player, msg, url), sendMail(player, msg, url));
+        jobs.push(sendPush(p, msg, url), sendMail(p, msg, url));
       }
     }
     await Promise.all(jobs);
   }
 
-  return {
-    dispatch,
-    pushPublicKey: push?.publicKey ?? null,
-    mailEnabled: Boolean(mailer),
-  };
+  return { dispatch, pushPublicKey: push?.publicKey ?? null, mailEnabled: Boolean(mailer) };
 }
