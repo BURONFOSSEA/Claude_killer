@@ -67,7 +67,8 @@ jobs:
       - name: Pointer le site vers la fonction Supabase
         env:
           PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
-        run: echo "window.KILLER_CONFIG = { apiUrl: 'https://$PROJECT_REF.supabase.co/functions/v1/api' };" > web/config.js
+        run: |
+          echo "window.KILLER_CONFIG = { apiUrl: 'https://$PROJECT_REF.supabase.co/functions/v1/api' };" > web/config.js
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
