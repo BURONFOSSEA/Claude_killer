@@ -1,6 +1,7 @@
 import { api, esc, $, $$, toast, formatDate, formatDuration, ago, toLocalInput, STATUS_LABEL } from './common.js';
 
 let aiOn = false;
+let mailOn = false;
 let current = null; // état complet de la partie ouverte
 let tab = 'players';
 let draftPlan = null; // plan en cours d'édition (ordonné selon la boucle)
@@ -27,6 +28,7 @@ async function boot() {
   try {
     const me = await api('/api/admin/me');
     aiOn = me.ai;
+    mailOn = me.mail;
     $('#login').classList.add('hidden');
     $('#app').classList.remove('hidden');
     route();
@@ -58,7 +60,10 @@ async function renderGames() {
   view().innerHTML = `
     <div class="row spread">
       <h1>Mes parties</h1>
-      ${aiOn ? '<span class="badge ai">IA activée</span>' : '<span class="badge" title="Définissez ANTHROPIC_API_KEY côté serveur">IA désactivée</span>'}
+      <div class="row">
+        ${aiOn ? '<span class="badge ai">IA activée</span>' : '<span class="badge" title="Définissez ANTHROPIC_API_KEY côté serveur">IA désactivée</span>'}
+        ${mailOn ? '<span class="badge running">E-mails activés</span>' : '<span class="badge" title="Définissez SMTP_HOST côté serveur">E-mails désactivés</span>'}
+      </div>
     </div>
     <div class="grid cols-2">
       <form class="card" id="newGameForm">
@@ -191,8 +196,9 @@ function renderPlayers() {
       draft
         ? `<form class="card" id="addPlayersForm">
         <h2>Ajouter des joueurs</h2>
-        <textarea id="newPlayers" placeholder="Un joueur par ligne. Optionnel : ajoutez des infos après un « ; »&#10;Alice ; compta, adore le café&#10;Bob ; arrive samedi midi"></textarea>
-        <div class="hint">Les infos après « ; » ne sont visibles que par vous et servent à l'IA pour personnaliser défis et attributions.</div>
+        <textarea id="newPlayers" placeholder="Un joueur par ligne. Optionnel, séparés par « ; » : e-mail et infos&#10;Alice ; alice@exemple.fr ; compta, adore le café&#10;Bob ; arrive samedi midi"></textarea>
+        <div class="hint">L'e-mail sert aux notifications (le joueur peut aussi le saisir lui-même). Les infos ne sont visibles que par vous
+          et servent à l'IA pour personnaliser défis et attributions.</div>
         <button class="primary mt" type="submit">Ajouter</button>
       </form>`
         : ''
@@ -205,12 +211,13 @@ function renderPlayers() {
       <p class="small dim">Chaque joueur se connecte sur <strong>${esc(location.origin)}/jouer</strong> avec son code personnel, ou via son lien direct.</p>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>Nom</th><th>Infos (privées)</th><th>Code</th>${draft ? '' : '<th>Statut</th><th>Kills</th>'}<th></th></tr></thead>
+          <thead><tr><th>Nom</th><th>E-mail</th><th>Infos (privées)</th><th>Code</th>${draft ? '' : '<th>Statut</th><th>Kills</th>'}<th></th></tr></thead>
           <tbody>
           ${players
             .map(
               (p) => `<tr data-player="${p.id}">
               <td><input value="${esc(p.name)}" data-field="name" maxlength="80" aria-label="Nom"></td>
+              <td><input type="email" value="${esc(p.email)}" data-field="email" maxlength="200" placeholder="—" aria-label="E-mail"></td>
               <td><input value="${esc(p.notes)}" data-field="notes" maxlength="1000" placeholder="—" aria-label="Infos"></td>
               <td class="mono">${esc(p.code)}</td>
               ${draft ? '' : `<td><span class="badge ${p.status}">${p.status === 'alive' ? 'en vie' : 'éliminé'}</span></td><td>${p.kills}</td>`}
@@ -234,8 +241,9 @@ function renderPlayers() {
     const entries = $('#newPlayers')
       .value.split('\n')
       .map((line) => {
-        const [name, ...rest] = line.split(';');
-        return { name: name.trim(), notes: rest.join(';').trim() };
+        const [name, ...rest] = line.split(';').map((part) => part.trim());
+        const email = rest.find((part) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(part)) || '';
+        return { name, email, notes: rest.filter((part) => part && part !== email).join(' ; ') };
       })
       .filter((p) => p.name);
     if (!entries.length) return;

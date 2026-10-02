@@ -23,6 +23,7 @@ async function load() {
     state = await api('/api/player/me');
     showApp();
     render();
+    loadNotifications();
   } catch (err) {
     if (err.status === 401) showLogin();
     else toast(err.message, 'error');
@@ -279,10 +280,136 @@ $('#loginForm').addEventListener('submit', async (e) => {
 });
 
 $('#logoutBtn').addEventListener('click', async () => {
+  // Sur un appareil partagé, le joueur suivant ne doit pas recevoir les notifications du précédent.
+  if (deviceSubscribed) await disablePush();
   await api('/api/player/logout', { method: 'POST' }).catch(() => {});
   revealed = false;
+  notif = null;
+  $('#notif').innerHTML = '';
   showLogin();
 });
 $('#refreshBtn').addEventListener('click', refresh);
+
+// ---------------------------------------------------------------- notifications
+
+const pushSupported = 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
+const isIos = /iphone|ipad|ipod/i.test(navigator.userAgent);
+const isStandalone = matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+let notif = null; // { email, push_key, mail_enabled }
+let deviceSubscribed = false;
+
+async function registration() {
+  return navigator.serviceWorker.register('/sw.js');
+}
+
+async function loadNotifications() {
+  try {
+    notif = await api('/api/player/notifications');
+    if (pushSupported) {
+      const reg = await registration();
+      deviceSubscribed = Boolean(await reg.pushManager.getSubscription()) && Notification.permission === 'granted';
+    }
+  } catch (err) {
+    console.error(err);
+  }
+  renderNotifications();
+}
+
+function renderNotifications() {
+  if (!notif) return;
+  let pushPart;
+  if (!notif.push_key) {
+    pushPart = '<p class="small dim">Les notifications push ne sont pas disponibles sur ce serveur.</p>';
+  } else if (!pushSupported) {
+    pushPart = isIos && !isStandalone
+      ? `<p class="small">📱 Sur iPhone : touche <strong>Partager</strong> puis <strong>« Sur l'écran d'accueil »</strong>,
+         ouvre le jeu depuis la nouvelle icône, puis active les notifications ici.</p>`
+      : '<p class="small dim">Ton navigateur ne gère pas les notifications push.</p>';
+  } else if (Notification.permission === 'denied') {
+    pushPart = '<p class="small">🔕 Notifications bloquées : autorise-les dans les réglages de ton navigateur pour ce site.</p>';
+  } else if (deviceSubscribed) {
+    pushPart = `<div class="row spread"><span>✅ Notifications activées sur cet appareil</span>
+      <button class="sm ghost" data-action="push-off">Désactiver</button></div>`;
+  } else {
+    pushPart = '<button class="primary block" data-action="push-on">🔔 Activer les notifications sur cet appareil</button>';
+  }
+  $('#notif').innerHTML = `
+    <div class="card mt-lg">
+      <h3>🔔 Être prévenu</h3>
+      <p class="small dim">Lancement de la partie, nouvelle cible, kill à confirmer, fin de partie… Les messages ne
+        révèlent jamais ta cible : ouvre l'appli pour voir les détails.</p>
+      ${pushPart}
+      <form id="emailForm" class="mt">
+        <label for="email">E-mail${notif.mail_enabled ? '' : ' <span class="dim small">(envoi désactivé sur ce serveur)</span>'}</label>
+        <div class="row">
+          <input id="email" type="email" autocomplete="email" placeholder="toi@exemple.fr" value="${esc(notif.email)}" style="flex:1 1 200px">
+          <button type="submit">Enregistrer</button>
+        </div>
+        <div class="hint">Laisse vide pour ne pas recevoir d'e-mails.</div>
+      </form>
+    </div>`;
+  $('#emailForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    try {
+      await api('/api/player/email', { method: 'PUT', body: { email: $('#email').value } });
+      notif.email = $('#email').value.trim();
+      toast(notif.email ? 'E-mail enregistré.' : 'E-mails désactivés.', 'success');
+    } catch (err) {
+      toast(err.message, 'error');
+    }
+  });
+}
+
+function urlBase64ToUint8Array(base64) {
+  const padded = (base64 + '='.repeat((4 - (base64.length % 4)) % 4)).replace(/-/g, '+').replace(/_/g, '/');
+  return Uint8Array.from(atob(padded), (c) => c.charCodeAt(0));
+}
+
+async function enablePush() {
+  try {
+    if ((await Notification.requestPermission()) !== 'granted') {
+      toast('Notifications refusées.', 'error');
+      return renderNotifications();
+    }
+    const reg = await registration();
+    await navigator.serviceWorker.ready;
+    const sub =
+      (await reg.pushManager.getSubscription()) ||
+      (await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlBase64ToUint8Array(notif.push_key) }));
+    await api('/api/player/push/subscribe', { method: 'POST', body: { subscription: sub.toJSON() } });
+    deviceSubscribed = true;
+    toast('Notifications activées 🔔', 'success');
+  } catch (err) {
+    toast(`Impossible d'activer les notifications : ${err.message}`, 'error');
+  }
+  renderNotifications();
+}
+
+async function disablePush() {
+  try {
+    const sub = await (await registration()).pushManager.getSubscription();
+    if (sub) {
+      await api('/api/player/push/unsubscribe', { method: 'POST', body: { endpoint: sub.endpoint } });
+      await sub.unsubscribe();
+    }
+    deviceSubscribed = false;
+    toast('Notifications désactivées sur cet appareil.');
+  } catch (err) {
+    toast(err.message, 'error');
+  }
+  renderNotifications();
+}
+
+document.addEventListener('click', (e) => {
+  const action = e.target.closest('[data-action]')?.dataset.action;
+  if (action === 'push-on') enablePush();
+  if (action === 'push-off') disablePush();
+});
+
+// Clic sur une notification alors que la page est ouverte, ou retour sur l'onglet : on rafraîchit.
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.addEventListener('message', (e) => e.data?.type === 'refresh' && refresh());
+}
+document.addEventListener('visibilitychange', () => !document.hidden && !$('#app').classList.contains('hidden') && refresh());
 
 boot();

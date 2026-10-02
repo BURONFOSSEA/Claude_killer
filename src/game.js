@@ -10,6 +10,11 @@ export class GameError extends Error {
 
 const OPEN = "('active', 'pending')";
 
+// Les actions du jeu renvoient des événements { type, to: [ids joueurs], gameId, data } :
+// le serveur les transmet ensuite au module de notifications (push + e-mail).
+const event = (type, gameId, to, data = {}) => ({ type, gameId, to: [to].flat().filter(Boolean), data });
+const allPlayers = (db, gameId) => db.prepare('SELECT id FROM players WHERE game_id = ?').all(gameId).map((p) => p.id);
+
 export function shuffle(array) {
   const a = [...array];
   for (let i = a.length - 1; i > 0; i--) {
@@ -126,6 +131,7 @@ export function launchGame(db, gameId) {
     for (const row of plan) insert.run(gameId, row.killer_id, row.target_id, row.challenge_text, now);
     db.prepare("UPDATE players SET status = 'alive', eliminated_at = NULL, eliminated_by = NULL WHERE game_id = ?").run(gameId);
     db.prepare("UPDATE games SET status = 'running', started_at = ? WHERE id = ?").run(now, gameId);
+    return { events: [event('game_started', gameId, players.map((p) => p.id))] };
   });
 }
 
@@ -147,6 +153,7 @@ export function finishGame(db, gameId, winnerId = null) {
   const now = nowIso();
   db.prepare(`UPDATE contracts SET status = 'void', closed_at = ? WHERE game_id = ? AND status IN ${OPEN}`).run(now, gameId);
   db.prepare("UPDATE games SET status = 'finished', finished_at = ?, winner_id = ? WHERE id = ?").run(now, winnerId, gameId);
+  return { events: [event('game_finished', gameId, allPlayers(db, gameId), { winnerId })] };
 }
 
 // Retire un joueur de la boucle : son chasseur hérite de sa cible et de son défi.
@@ -163,16 +170,18 @@ function removeFromChain(db, gameId, victimId, { killerId = null, how, confirmed
     'INSERT INTO kills (game_id, killer_id, victim_id, challenge_text, contract_started_at, confirmed_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
   ).run(gameId, killerId, victimId, inbound?.challenge_text ?? null, inbound?.created_at ?? null, confirmedBy, now);
 
-  if (!inbound || !outbound) return { finished: false };
+  const events = [event(how === 'kill' ? 'you_were_killed' : 'you_were_removed', gameId, victimId)];
+  if (!inbound || !outbound) return { finished: false, events };
   const hunter = inbound.killer_id;
   const next = outbound.target_id;
   if (next === hunter) {
-    finishGame(db, gameId, hunter);
-    return { finished: true, winnerId: hunter };
+    const finished = finishGame(db, gameId, hunter);
+    return { finished: true, winnerId: hunter, events: [...events, ...finished.events] };
   }
   db.prepare('INSERT INTO contracts (game_id, killer_id, target_id, challenge_text, created_at) VALUES (?, ?, ?, ?, ?)')
     .run(gameId, hunter, next, outbound.challenge_text, now);
-  return { finished: false };
+  events.push(event(how === 'kill' ? 'kill_confirmed' : 'target_removed', gameId, hunter));
+  return { finished: false, events };
 }
 
 // Le tueur déclare avoir réalisé son défi : le kill passe "en attente" de confirmation par la cible.
@@ -185,6 +194,7 @@ export function declareKill(db, playerId) {
     if (!contract) throw new GameError("Vous n'avez pas de cible actuellement.");
     if (contract.status === 'pending') throw new GameError('Kill déjà déclaré, en attente de confirmation.');
     db.prepare("UPDATE contracts SET status = 'pending', declared_at = ? WHERE id = ?").run(nowIso(), contract.id);
+    return { events: [event('kill_declared', player.game_id, contract.target_id)] };
   });
 }
 
@@ -211,10 +221,11 @@ export function confirmKill(db, contractId, by) {
 }
 
 // La victime (ou l'admin) conteste : le contrat redevient actif.
-export function contestKill(db, contractId) {
+export function contestKill(db, contractId, by = 'target') {
   const contract = db.prepare('SELECT * FROM contracts WHERE id = ?').get(contractId);
   if (!contract || contract.status !== 'pending') throw new GameError("Ce kill n'est plus en attente.");
   db.prepare("UPDATE contracts SET status = 'active', declared_at = NULL, contested = contested + 1 WHERE id = ?").run(contractId);
+  return { events: [event(by === 'admin' ? 'kill_rejected' : 'kill_contested', contract.game_id, contract.killer_id)] };
 }
 
 // Élimination administrative (abandon, triche...) : le chasseur hérite de la cible du joueur retiré.
@@ -231,8 +242,11 @@ export function eliminatePlayer(db, playerId) {
 export function updateContractChallenge(db, contractId, text) {
   const clean = String(text || '').trim();
   if (!clean) throw new GameError('Le défi ne peut pas être vide.');
-  const res = db.prepare(`UPDATE contracts SET challenge_text = ? WHERE id = ? AND status IN ${OPEN}`).run(clean, contractId);
-  if (res.changes === 0) throw new GameError('Contrat introuvable ou déjà clos.');
+  const contract = db.prepare(`SELECT * FROM contracts WHERE id = ? AND status IN ${OPEN}`).get(contractId);
+  if (!contract) throw new GameError('Contrat introuvable ou déjà clos.');
+  if (contract.challenge_text === clean) return { events: [] };
+  db.prepare('UPDATE contracts SET challenge_text = ? WHERE id = ?').run(clean, contractId);
+  return { events: [event('challenge_changed', contract.game_id, contract.killer_id)] };
 }
 
 // ---------- Vues ----------

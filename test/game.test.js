@@ -78,7 +78,8 @@ test('le dernier survivant gagne et la partie se termine', () => {
   launchGame(db, gameId);
   confirmKill(db, openContract(db, ids[0]).id, 'admin'); // P0 tue P1, chasse P2
   const result = confirmKill(db, openContract(db, ids[0]).id, 'admin'); // P0 tue P2
-  assert.deepEqual(result, { finished: true, winnerId: ids[0] });
+  assert.equal(result.finished, true);
+  assert.equal(result.winnerId, ids[0]);
   const game = db.prepare('SELECT * FROM games WHERE id = ?').get(gameId);
   assert.equal(game.status, 'finished');
   assert.equal(game.winner_id, ids[0]);

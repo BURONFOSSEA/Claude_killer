@@ -39,10 +39,36 @@ Il peut ensuite être changé depuis l'interface.
 ### Espace joueur (code personnel)
 - Ne voit **que sa cible et son défi** (masqués tant qu'on ne tape pas dessus, anti-regard indiscret).
 - Chrono depuis le début de la partie et compte à rebours jusqu'à la fin prévue.
+- Notifications push et e-mail à chaque nouveauté le concernant.
 - Bouton « J'ai éliminé ma cible » → la cible confirme ou conteste (l'organisateur peut trancher).
 - Statistiques personnelles : kills, temps de survie, kill le plus rapide, temps moyen, victimes,
   « dernière élimination dans la partie il y a… ».
 - **Jamais le nombre de joueurs restants.** Le classement complet n'est révélé qu'à la fin.
+
+## Notifications (push + e-mail)
+
+Chaque joueur est prévenu dès qu'il se passe quelque chose qui le concerne :
+
+| Événement | Qui est prévenu |
+|---|---|
+| Lancement de la partie | tous les joueurs |
+| Kill déclaré | la cible (pour confirmer ou contester) |
+| Kill validé | le tueur (nouvelle cible) et la victime |
+| Kill contesté / refusé par l'organisateur | le tueur |
+| Joueur retiré par l'organisateur | le joueur retiré et son chasseur (nouvelle cible) |
+| Défi modifié par l'organisateur | le joueur concerné |
+| Fin de partie | tous les joueurs (message spécial pour le vainqueur) |
+
+Les messages **ne contiennent jamais le nom de la cible ni le défi**, pour qu'un écran verrouillé ou une boîte
+mail ne révèle rien : ils invitent à ouvrir l'appli.
+
+- **Push** : le joueur touche « Activer les notifications » sur sa page. Fonctionne sur Android, ordinateur, et
+  sur iPhone (iOS 16.4+) **après avoir ajouté le site à l'écran d'accueil**. Nécessite HTTPS en production.
+  Les clés VAPID sont générées automatiquement au premier démarrage (ou fournies via `VAPID_*`).
+- **E-mail** : renseignez `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `MAIL_FROM` (Gmail avec mot de
+  passe d'application, Brevo, OVH, Office 365…). L'adresse se saisit par l'organisateur
+  (« Alice ; alice@exemple.fr ; infos ») ou par le joueur lui-même. Sans SMTP, les e-mails sont désactivés.
+- Définissez `PUBLIC_URL` pour que les liens pointent vers la bonne adresse.
 
 ## IA
 
@@ -75,6 +101,7 @@ Claude_killer/
 │   ├── auth.js             # mots de passe, sessions, limitation
 │   ├── game.js             # boucle, kills, héritage des cibles, vues
 │   ├── ai.js               # intégration Claude + mode hors-ligne
+│   ├── notify.js           # notifications push + e-mail
 │   └── challenge-library.js
 ├── public/                 # interface (HTML/CSS/JS sans framework)
 └── test/

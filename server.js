@@ -35,10 +35,13 @@ import {
   validatePlan,
 } from './src/game.js';
 import { aiEnabled, generateChallenges, proposeAssignments } from './src/ai.js';
+import { createMailerFromEnv, createNotifier, createPushFromEnv } from './src/notify.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
-export function createApp({ db, secureCookies = false } = {}) {
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+export function createApp({ db, secureCookies = false, notifier = createNotifier({ db }), publicUrl = '' } = {}) {
   const app = express();
   app.disable('x-powered-by');
   app.set('trust proxy', 1);
@@ -88,6 +91,18 @@ export function createApp({ db, secureCookies = false } = {}) {
   const admin = auth('admin');
   const player = auth('player');
 
+  // Envoie les notifications après la réponse, sans la retarder ni la faire échouer.
+  function notify(req, result) {
+    if (!result?.events?.length) return;
+    const baseUrl = publicUrl || `${req.protocol}://${req.get('host')}`;
+    notifier.dispatch(result.events, { baseUrl }).catch((err) => console.error('[notifications]', err));
+  }
+  const email = (v) => {
+    const e = String(v ?? '').trim().slice(0, 200);
+    if (e && !EMAIL_RE.test(e)) throw new GameError(`Adresse e-mail invalide : ${e}`);
+    return e;
+  };
+
   const str = (v, max = 500) => String(v ?? '').trim().slice(0, max);
   const id = (v) => {
     const n = Number(v);
@@ -122,7 +137,7 @@ export function createApp({ db, secureCookies = false } = {}) {
   // Toute modification des joueurs invalide la proposition d'attribution.
   const resetPlan = (gameId) => db.prepare('UPDATE games SET plan_json = NULL WHERE id = ?').run(gameId);
 
-  app.get('/api/config', (req, res) => res.json({ ai: aiEnabled() }));
+  app.get('/api/config', (req, res) => res.json({ ai: aiEnabled(), push_key: notifier.pushPublicKey, mail: notifier.mailEnabled }));
 
   // ---------------- Admin : session ----------------
 
@@ -146,7 +161,7 @@ export function createApp({ db, secureCookies = false } = {}) {
 
   app.get('/api/admin/me', admin, (req, res) => {
     const row = db.prepare('SELECT username FROM admins WHERE id = ?').get(req.subjectId);
-    res.json({ username: row?.username, ai: aiEnabled() });
+    res.json({ username: row?.username, ai: aiEnabled(), push: Boolean(notifier.pushPublicKey), mail: notifier.mailEnabled });
   });
 
   app.post('/api/admin/password', admin, (req, res) => {
@@ -204,14 +219,14 @@ export function createApp({ db, secureCookies = false } = {}) {
   });
 
   app.post('/api/admin/games/:id/launch', admin, (req, res) => {
-    launchGame(db, id(req.params.id));
+    notify(req, launchGame(db, id(req.params.id)));
     res.json({ ok: true });
   });
 
   app.post('/api/admin/games/:id/finish', admin, (req, res) => {
     const game = getGame(db, id(req.params.id));
     if (game.status !== 'running') throw new GameError("La partie n'est pas en cours.");
-    finishGame(db, game.id, null);
+    notify(req, finishGame(db, game.id, null));
     res.json({ ok: true });
   });
 
@@ -221,13 +236,13 @@ export function createApp({ db, secureCookies = false } = {}) {
     const gameId = id(req.params.id);
     requireDraft(gameId, "d'ajouter des joueurs");
     const entries = Array.isArray(req.body.players) ? req.body.players : [req.body];
-    const insert = db.prepare('INSERT INTO players (game_id, name, notes, code) VALUES (?, ?, ?, ?)');
+    const insert = db.prepare('INSERT INTO players (game_id, name, notes, email, code) VALUES (?, ?, ?, ?, ?)');
     const created = tx(db, () => {
       const out = [];
       for (const e of entries.slice(0, 500)) {
         const name = str(e.name, 80);
         if (!name) continue;
-        insert.run(gameId, name, str(e.notes, 1000), uniqueCode());
+        insert.run(gameId, name, str(e.notes, 1000), email(e.email), uniqueCode());
         out.push(name);
       }
       if (out.length) resetPlan(gameId);
@@ -242,7 +257,8 @@ export function createApp({ db, secureCookies = false } = {}) {
     const name = req.body.name !== undefined ? str(req.body.name, 80) : p.name;
     if (!name) throw new GameError('Le nom ne peut pas être vide.');
     const notes = req.body.notes !== undefined ? str(req.body.notes, 1000) : p.notes;
-    db.prepare('UPDATE players SET name = ?, notes = ? WHERE id = ?').run(name, notes, p.id);
+    const mail = req.body.email !== undefined ? email(req.body.email) : p.email;
+    db.prepare('UPDATE players SET name = ?, notes = ?, email = ? WHERE id = ?').run(name, notes, mail, p.id);
     res.json({ ok: true });
   });
 
@@ -266,7 +282,9 @@ export function createApp({ db, secureCookies = false } = {}) {
   });
 
   app.post('/api/admin/players/:pid/eliminate', admin, (req, res) => {
-    res.json(eliminatePlayer(db, id(req.params.pid)));
+    const result = eliminatePlayer(db, id(req.params.pid));
+    notify(req, result);
+    res.json({ finished: result.finished });
   });
 
   // ---------------- Admin : défis ----------------
@@ -349,16 +367,18 @@ export function createApp({ db, secureCookies = false } = {}) {
   // ---------------- Admin : contrats en cours ----------------
 
   app.post('/api/admin/contracts/:cid/confirm', admin, (req, res) => {
-    res.json(confirmKill(db, contractOf(id(req.params.cid)).id, 'admin'));
+    const result = confirmKill(db, contractOf(id(req.params.cid)).id, 'admin');
+    notify(req, result);
+    res.json({ finished: result.finished });
   });
 
   app.post('/api/admin/contracts/:cid/reject', admin, (req, res) => {
-    contestKill(db, contractOf(id(req.params.cid)).id);
+    notify(req, contestKill(db, contractOf(id(req.params.cid)).id, 'admin'));
     res.json({ ok: true });
   });
 
   app.patch('/api/admin/contracts/:cid', admin, (req, res) => {
-    updateContractChallenge(db, contractOf(id(req.params.cid)).id, str(req.body.challenge_text, 500));
+    notify(req, updateContractChallenge(db, contractOf(id(req.params.cid)).id, str(req.body.challenge_text, 500)));
     res.json({ ok: true });
   });
 
@@ -385,12 +405,41 @@ export function createApp({ db, secureCookies = false } = {}) {
   app.get('/api/player/me', player, (req, res) => res.json(playerView(db, req.subjectId)));
 
   app.post('/api/player/kill', player, (req, res) => {
-    declareKill(db, req.subjectId);
+    notify(req, declareKill(db, req.subjectId));
     res.json({ ok: true });
   });
 
   app.post('/api/player/kill/cancel', player, (req, res) => {
     cancelDeclaration(db, req.subjectId);
+    res.json({ ok: true });
+  });
+
+  // Préférences de notification du joueur.
+  app.get('/api/player/notifications', player, (req, res) => {
+    const p = playerOf(req.subjectId);
+    const subs = db.prepare('SELECT COUNT(*) AS n FROM push_subscriptions WHERE player_id = ?').get(p.id).n;
+    res.json({ email: p.email, push_devices: subs, push_key: notifier.pushPublicKey, mail_enabled: notifier.mailEnabled });
+  });
+
+  app.put('/api/player/email', player, (req, res) => {
+    db.prepare('UPDATE players SET email = ? WHERE id = ?').run(email(req.body.email), req.subjectId);
+    res.json({ ok: true });
+  });
+
+  app.post('/api/player/push/subscribe', player, (req, res) => {
+    const sub = req.body.subscription || {};
+    const endpoint = str(sub.endpoint, 1000);
+    if (!/^https:\/\//.test(endpoint) || !sub.keys?.p256dh || !sub.keys?.auth) throw new GameError('Abonnement push invalide.');
+    const keys = JSON.stringify({ p256dh: str(sub.keys.p256dh, 200), auth: str(sub.keys.auth, 200) });
+    db.prepare(
+      `INSERT INTO push_subscriptions (player_id, endpoint, keys_json) VALUES (?, ?, ?)
+       ON CONFLICT(endpoint) DO UPDATE SET player_id = excluded.player_id, keys_json = excluded.keys_json`,
+    ).run(req.subjectId, endpoint, keys);
+    res.json({ ok: true });
+  });
+
+  app.post('/api/player/push/unsubscribe', player, (req, res) => {
+    db.prepare('DELETE FROM push_subscriptions WHERE player_id = ? AND endpoint = ?').run(req.subjectId, str(req.body.endpoint, 1000));
     res.json({ ok: true });
   });
 
@@ -401,11 +450,11 @@ export function createApp({ db, secureCookies = false } = {}) {
     return c;
   }
   app.post('/api/player/incoming/confirm', player, (req, res) => {
-    confirmKill(db, incomingContract(req.subjectId).id, 'target');
+    notify(req, confirmKill(db, incomingContract(req.subjectId).id, 'target'));
     res.json({ ok: true });
   });
   app.post('/api/player/incoming/contest', player, (req, res) => {
-    contestKill(db, incomingContract(req.subjectId).id);
+    notify(req, contestKill(db, incomingContract(req.subjectId).id));
     res.json({ ok: true });
   });
 
@@ -439,8 +488,18 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     if (created.password) console.log(`Mot de passe généré (à changer depuis l'interface) : ${created.password}`);
   }
   const port = Number(process.env.PORT) || 3000;
-  createApp({ db, secureCookies: process.env.COOKIE_SECURE === 'true' }).listen(port, () => {
+  const mailer = createMailerFromEnv();
+  const notifier = createNotifier({ db, mailer, push: createPushFromEnv(db) });
+  const app = createApp({
+    db,
+    notifier,
+    secureCookies: process.env.COOKIE_SECURE === 'true',
+    publicUrl: (process.env.PUBLIC_URL || '').replace(/\/$/, ''),
+  });
+  app.listen(port, () => {
     console.log(`Killer Game prêt sur http://localhost:${port}`);
     console.log(aiEnabled() ? 'IA : activée (Claude).' : 'IA : désactivée (définissez ANTHROPIC_API_KEY pour l’activer).');
+    console.log(mailer ? 'E-mails : activés (SMTP).' : 'E-mails : désactivés (définissez SMTP_HOST pour les activer).');
+    console.log('Notifications push : activées.');
   });
 }

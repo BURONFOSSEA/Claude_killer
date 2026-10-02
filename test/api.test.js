@@ -10,11 +10,13 @@ delete process.env.ANTHROPIC_AUTH_TOKEN;
 
 let server;
 let base;
+const dispatched = []; // événements transmis au module de notifications
+const fakeNotifier = { pushPublicKey: 'cle-test', mailEnabled: true, dispatch: async (events) => dispatched.push(...events) };
 
 before(async () => {
   const db = openDb(':memory:');
   ensureAdmin(db, { username: 'admin', password: 'secret-pass' });
-  server = createApp({ db }).listen(0);
+  server = createApp({ db, notifier: fakeNotifier }).listen(0);
   await new Promise((r) => server.once('listening', r));
   base = `http://127.0.0.1:${server.address().port}`;
 });
@@ -44,8 +46,12 @@ test('parcours complet d’une partie', async () => {
   const { data: game } = await admin('/api/admin/games', { method: 'POST', body: { name: 'Soirée test', theme: 'anniversaire' } });
   await admin(`/api/admin/games/${game.id}/players`, {
     method: 'POST',
-    body: { players: [{ name: 'Alice', notes: 'aime le café' }, { name: 'Bob' }, { name: 'Chloé' }] },
+    body: { players: [{ name: 'Alice', notes: 'aime le café', email: 'alice@ex.fr' }, { name: 'Bob' }, { name: 'Chloé' }] },
   });
+  assert.equal(
+    (await admin(`/api/admin/games/${game.id}/players`, { method: 'POST', body: { name: 'X', email: 'pas-un-mail' } })).status,
+    400,
+  );
 
   // Suggestions hors-ligne puis ajout
   const { data: sugg } = await admin(`/api/admin/games/${game.id}/ai/challenges`, { method: 'POST', body: { count: 5 } });
@@ -68,6 +74,8 @@ test('parcours complet d’une partie', async () => {
   await admin(`/api/admin/games/${game.id}/plan`, { method: 'PUT', body: { plan: plan.plan } });
 
   assert.equal((await admin(`/api/admin/games/${game.id}/launch`, { method: 'POST' })).status, 200);
+  assert.equal(dispatched.at(-1).type, 'game_started');
+  assert.equal(dispatched.at(-1).to.length, 3);
   const { data: state } = await admin(`/api/admin/games/${game.id}`);
   assert.equal(state.contracts.length, 3);
 
@@ -92,7 +100,22 @@ test('parcours complet d’une partie', async () => {
   assert.equal(kView.target.name, state.players.find((p) => p.id === first.target_id).name);
   assert.ok(!JSON.stringify(kView).includes('code'));
 
+  // Préférences de notification
+  const { data: prefs } = await killer('/api/player/notifications');
+  assert.equal(prefs.push_key, 'cle-test');
+  assert.equal((await killer('/api/player/email', { method: 'PUT', body: { email: 'faux' } })).status, 400);
+  assert.equal((await killer('/api/player/email', { method: 'PUT', body: { email: 'moi@ex.fr' } })).status, 200);
+  assert.equal((await killer('/api/player/notifications')).data.email, 'moi@ex.fr');
+  const subscription = { endpoint: 'https://push.example/abc', keys: { p256dh: 'k', auth: 'a' } };
+  assert.equal((await killer('/api/player/push/subscribe', { method: 'POST', body: { subscription } })).status, 200);
+  assert.equal((await killer('/api/player/notifications')).data.push_devices, 1);
+  assert.equal(
+    (await killer('/api/player/push/subscribe', { method: 'POST', body: { subscription: { endpoint: 'http://x' } } })).status,
+    400,
+  );
+
   await killer('/api/player/kill', { method: 'POST' });
+  assert.deepEqual(dispatched.at(-1), { type: 'kill_declared', gameId: game.id, to: [first.target_id], data: {} });
   const { data: vView } = await victim('/api/player/me');
   assert.ok(vView.incoming);
   assert.equal((await victim('/api/player/incoming/confirm', { method: 'POST' })).status, 200);
@@ -106,6 +129,7 @@ test('parcours complet d’une partie', async () => {
   const { data: final } = await killer('/api/player/me');
   assert.equal(final.game.status, 'finished');
   assert.equal(final.final.winner, kView.me.name);
+  assert.equal(dispatched.at(-1).type, 'game_finished');
 });
 
 test('les requêtes non-JSON sont refusées (anti-CSRF)', async () => {

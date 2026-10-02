@@ -79,13 +79,46 @@ CREATE TABLE IF NOT EXISTS kills (
   created_at     TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_kills_game ON kills(game_id);
+
+-- Abonnements aux notifications push (un joueur peut en avoir plusieurs : téléphone, ordinateur...).
+CREATE TABLE IF NOT EXISTS push_subscriptions (
+  id         INTEGER PRIMARY KEY,
+  player_id  INTEGER NOT NULL REFERENCES players(id) ON DELETE CASCADE,
+  endpoint   TEXT NOT NULL UNIQUE,
+  keys_json  TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+CREATE TABLE IF NOT EXISTS settings (
+  key   TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
 `;
+
+// Colonnes ajoutées après la première version : ajoutées aux bases existantes au démarrage.
+const MIGRATIONS = [['players', 'email', "TEXT NOT NULL DEFAULT ''"]];
+
+function migrate(db) {
+  for (const [table, column, definition] of MIGRATIONS) {
+    const exists = db.prepare(`PRAGMA table_info(${table})`).all().some((c) => c.name === column);
+    if (!exists) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+  }
+}
+
+export function getSetting(db, key) {
+  return db.prepare('SELECT value FROM settings WHERE key = ?').get(key)?.value ?? null;
+}
+
+export function setSetting(db, key, value) {
+  db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run(key, value);
+}
 
 export function openDb(file) {
   if (file !== ':memory:') fs.mkdirSync(path.dirname(file), { recursive: true });
   const db = new DatabaseSync(file);
   db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;');
   db.exec(SCHEMA);
+  migrate(db);
   return db;
 }
 
