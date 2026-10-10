@@ -1,4 +1,5 @@
 import { api, esc, $, toast, formatDuration, formatClock, formatDate, ago } from './common.js';
+import { createNotificationCard } from './push.js';
 
 let state = null;
 let revealed = false; // la cible reste masquée tant que le joueur ne tape pas dessus
@@ -24,6 +25,7 @@ async function load() {
     showApp();
     render();
     loadNotifications();
+    loadMessages();
   } catch (err) {
     if (err.status === 401) showLogin();
     else toast(err.message, 'error');
@@ -48,6 +50,7 @@ async function refresh() {
   try {
     state = await api('/api/player/me');
     render();
+    checkMessages();
   } catch (err) {
     if (err.status === 401) showLogin();
   }
@@ -281,130 +284,91 @@ $('#loginForm').addEventListener('submit', async (e) => {
 
 $('#logoutBtn').addEventListener('click', async () => {
   // Sur un appareil partagé, le joueur suivant ne doit pas recevoir les notifications du précédent.
-  if (deviceSubscribed) await disablePush();
+  if (notifications.subscribed) await notifications.disable({ silent: true });
   await api('/api/player/logout', { method: 'POST' }).catch(() => {});
   revealed = false;
-  notif = null;
-  $('#notif').innerHTML = '';
+  notifications.clear();
+  $('#messages').innerHTML = '';
+  messagesLoaded = false;
   showLogin();
 });
 $('#refreshBtn').addEventListener('click', refresh);
 
-// ---------------------------------------------------------------- notifications
+// ---------------------------------------------------------------- messagerie (joueur ↔ organisateur)
 
-const pushSupported = 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
-const isIos = /iphone|ipad|ipod/i.test(navigator.userAgent);
-const isStandalone = matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
-let notif = null; // { email, push_key, mail_enabled }
-let deviceSubscribed = false;
+let messagesLoaded = false;
 
-async function registration() {
-  return navigator.serviceWorker.register('sw.js');
-}
-
-async function loadNotifications() {
-  try {
-    notif = await api('/api/player/notifications');
-    if (pushSupported) {
-      const reg = await registration();
-      deviceSubscribed = Boolean(await reg.pushManager.getSubscription()) && Notification.permission === 'granted';
-    }
-  } catch (err) {
-    console.error(err);
-  }
-  renderNotifications();
-}
-
-function renderNotifications() {
-  if (!notif) return;
-  let pushPart;
-  if (!notif.push_key) {
-    pushPart = '<p class="small dim">Les notifications push ne sont pas disponibles sur ce serveur.</p>';
-  } else if (!pushSupported) {
-    pushPart = isIos && !isStandalone
-      ? `<p class="small">📱 Sur iPhone : touche <strong>Partager</strong> puis <strong>« Sur l'écran d'accueil »</strong>,
-         ouvre le jeu depuis la nouvelle icône, puis active les notifications ici.</p>`
-      : '<p class="small dim">Ton navigateur ne gère pas les notifications push.</p>';
-  } else if (Notification.permission === 'denied') {
-    pushPart = '<p class="small">🔕 Notifications bloquées : autorise-les dans les réglages de ton navigateur pour ce site.</p>';
-  } else if (deviceSubscribed) {
-    pushPart = `<div class="row spread"><span>✅ Notifications activées sur cet appareil</span>
-      <button class="sm ghost" data-action="push-off">Désactiver</button></div>`;
-  } else {
-    pushPart = '<button class="primary block" data-action="push-on">🔔 Activer les notifications sur cet appareil</button>';
-  }
-  $('#notif').innerHTML = `
+function renderMessagesCard() {
+  $('#messages').innerHTML = `
     <div class="card mt-lg">
-      <h3>🔔 Être prévenu</h3>
-      <p class="small dim">Lancement de la partie, nouvelle cible, kill à confirmer, fin de partie… Les messages ne
-        révèlent jamais ta cible : ouvre l'appli pour voir les détails.</p>
-      ${pushPart}
-      <form id="emailForm" class="mt">
-        <label for="email">E-mail${notif.mail_enabled ? '' : ' <span class="dim small">(envoi désactivé sur ce serveur)</span>'}</label>
-        <div class="row">
-          <input id="email" type="email" autocomplete="email" placeholder="toi@exemple.fr" value="${esc(notif.email)}" style="flex:1 1 200px">
-          <button type="submit">Enregistrer</button>
+      <h3>💬 Messages</h3>
+      <div id="msgList" class="chat"><p class="small dim">Chargement…</p></div>
+      <form id="msgForm" class="mt">
+        <label for="msgBody" class="small">Écrire à l'organisateur</label>
+        <textarea id="msgBody" maxlength="1000" rows="3" placeholder="Une question, un doute sur un kill…" required></textarea>
+        <div class="row spread mt">
+          <span class="hint">Seul l'organisateur lit tes messages.</span>
+          <button class="primary" type="submit">Envoyer</button>
         </div>
-        <div class="hint">Laisse vide pour ne pas recevoir d'e-mails.</div>
       </form>
     </div>`;
-  $('#emailForm').addEventListener('submit', async (e) => {
+  $('#msgForm').addEventListener('submit', async (e) => {
     e.preventDefault();
+    const body = $('#msgBody').value.trim();
+    if (!body) return;
+    const btn = e.target.querySelector('button');
+    btn.disabled = true;
     try {
-      await api('/api/player/email', { method: 'PUT', body: { email: $('#email').value } });
-      notif.email = $('#email').value.trim();
-      toast(notif.email ? 'E-mail enregistré.' : 'E-mails désactivés.', 'success');
+      await api('/api/player/messages', { method: 'POST', body: { body } });
+      $('#msgBody').value = '';
+      toast("Message envoyé à l'organisateur.", 'success');
+      await loadMessages();
     } catch (err) {
       toast(err.message, 'error');
     }
+    btn.disabled = false;
   });
 }
 
-function urlBase64ToUint8Array(base64) {
-  const padded = (base64 + '='.repeat((4 - (base64.length % 4)) % 4)).replace(/-/g, '+').replace(/_/g, '/');
-  return Uint8Array.from(atob(padded), (c) => c.charCodeAt(0));
-}
-
-async function enablePush() {
+async function loadMessages() {
+  if (!$('#msgList')) renderMessagesCard();
   try {
-    if ((await Notification.requestPermission()) !== 'granted') {
-      toast('Notifications refusées.', 'error');
-      return renderNotifications();
-    }
-    const reg = await registration();
-    await navigator.serviceWorker.ready;
-    const sub =
-      (await reg.pushManager.getSubscription()) ||
-      (await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlBase64ToUint8Array(notif.push_key) }));
-    await api('/api/player/push/subscribe', { method: 'POST', body: { subscription: sub.toJSON() } });
-    deviceSubscribed = true;
-    toast('Notifications activées 🔔', 'success');
+    const { messages } = await api('/api/player/messages');
+    messagesLoaded = true;
+    const list = $('#msgList');
+    list.innerHTML = messages.length
+      ? messages
+          .map(
+            (m) => `<div class="bubble ${m.from === 'me' ? 'me' : 'them'}${m.unread ? ' unread' : ''}">
+              <div class="meta">${m.from === 'me' ? 'Toi' : "Organisateur"}${m.group ? ` · à ${esc(m.group)}` : ''} · ${esc(formatDate(m.at))}</div>
+              <div class="text">${esc(m.body)}</div></div>`,
+          )
+          .join('')
+      : '<p class="small dim">Aucun message pour le moment.</p>';
+    list.scrollTop = list.scrollHeight;
   } catch (err) {
-    toast(`Impossible d'activer les notifications : ${err.message}`, 'error');
+    console.error(err);
   }
-  renderNotifications();
 }
 
-async function disablePush() {
-  try {
-    const sub = await (await registration()).pushManager.getSubscription();
-    if (sub) {
-      await api('/api/player/push/unsubscribe', { method: 'POST', body: { endpoint: sub.endpoint } });
-      await sub.unsubscribe();
-    }
-    deviceSubscribed = false;
-    toast('Notifications désactivées sur cet appareil.');
-  } catch (err) {
-    toast(err.message, 'error');
+// Appelé à chaque rafraîchissement : recharge le fil quand un nouveau message arrive.
+function checkMessages() {
+  if (!messagesLoaded) return loadMessages();
+  if (state?.unread_messages > 0) {
+    toast("💬 Nouveau message de l'organisateur");
+    loadMessages();
   }
-  renderNotifications();
 }
 
-document.addEventListener('click', (e) => {
-  const action = e.target.closest('[data-action]')?.dataset.action;
-  if (action === 'push-on') enablePush();
-  if (action === 'push-off') disablePush();
+// ---------------------------------------------------------------- notifications
+
+const notifications = createNotificationCard({
+  base: '/api/player',
+  root: $('#notif'),
+  intro: `Lancement de la partie, nouvelle cible, kill à confirmer, message de l'organisateur, fin de partie…
+    Les notifications ne révèlent jamais ta cible : ouvre l'appli pour voir les détails.`,
 });
+const loadNotifications = () => notifications.load();
 
 // Clic sur une notification alors que la page est ouverte, ou retour sur l'onglet : on rafraîchit.
 if ('serviceWorker' in navigator) {

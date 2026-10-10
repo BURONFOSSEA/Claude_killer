@@ -79,6 +79,13 @@ Le site est ensuite disponible sur **https://&lt;votre-compte&gt;.github.io/Clau
 - « J'ai éliminé ma cible » : la cible confirme ou conteste, et l'organisateur peut trancher.
 - Statistiques personnelles. **Jamais le nombre de joueurs restants** ; le classement n'est révélé qu'à la fin.
 
+### Messagerie
+- L'organisateur écrit à **tous les joueurs**, aux **joueurs en vie**, aux **joueurs éliminés** ou à des
+  **joueurs choisis** (onglet *Messages* de la partie) ; il voit une conversation par joueur et peut répondre.
+- Un joueur ne peut écrire **qu'à l'organisateur**.
+- Chaque message déclenche une notification (push + e-mail) au destinataire, avec le début du message.
+- Messages non lus signalés côté organisateur (liste des parties et onglet *Messages*).
+
 ### Notifications (push + e-mail)
 
 | Événement | Qui est prévenu |
@@ -90,8 +97,16 @@ Le site est ensuite disponible sur **https://&lt;votre-compte&gt;.github.io/Clau
 | Joueur retiré par l'organisateur | le joueur retiré et son chasseur (nouvelle cible) |
 | Défi modifié | le joueur concerné |
 | Fin de partie | tous les joueurs (message spécial pour le vainqueur) |
+| Message de l'organisateur | les destinataires choisis |
+| Kill toujours en attente après 2 h | la cible (rappel) |
 
-Les messages **ne révèlent jamais la cible ni le défi**. Le push fonctionne sur Android, sur ordinateur, et sur
+L'**organisateur** est aussi prévenu (bouton *🔔 Notifications* de l'espace organisateur, à activer sur chaque
+appareil, + e-mail facultatif) : kill déclaré, kill contesté (à trancher), kill confirmé par la victime, kill en
+attente depuis plus de 2 h (rappel envoyé aussi à la cible), message d'un joueur, fin de partie avec le vainqueur.
+Les rappels sont déclenchés chaque heure par le workflow *Rappels et maintien en activité*, qui garde aussi le
+projet Supabase actif.
+
+Les notifications des joueurs **ne révèlent jamais la cible ni le défi**. Le push fonctionne sur Android, sur ordinateur, et sur
 iPhone (iOS 16.4+) **après « Sur l'écran d'accueil »**. Les clés VAPID sont générées automatiquement.
 
 ## Sécurité
@@ -124,8 +139,9 @@ supabase/functions/
     ├── game.js              # boucle, kills, héritage des cibles, vues
     ├── auth.js              # mots de passe, sessions, limitation
     ├── notify.js            # push + e-mail
+    ├── messages.js          # messagerie organisateur ↔ joueurs
     ├── ai.js                # intégration Claude + mode hors-ligne
     └── db.js                # schéma Postgres
 dev/server.js                # serveur local (Node + PGlite)
-.github/workflows/           # déploiement, tests, maintien en activité de Supabase
+.github/workflows/           # déploiement, tests, rappels horaires (+ maintien en activité de Supabase)
 ```

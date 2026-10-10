@@ -1,0 +1,18 @@
+# Tâche horaire :
+#  - rappels pour les kills déclarés depuis plus de 2 h sans réponse (cible + organisateur) ;
+#  - garde le projet Supabase actif (les projets gratuits se mettent en pause après 7 jours sans activité).
+name: Rappels et maintien en activité
+
+on:
+  schedule:
+    - cron: '23 * * * *'
+  workflow_dispatch:
+
+jobs:
+  reminders:
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
+        run: |
+          curl -fsS -X POST -H 'content-type: application/json' "https://$PROJECT_REF.supabase.co/functions/v1/api/cron/reminders"

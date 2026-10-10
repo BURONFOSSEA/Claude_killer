@@ -13,6 +13,8 @@ const OPEN = "('active', 'pending')";
 // Les actions du jeu renvoient des événements { type, to: [ids joueurs], gameId, data } :
 // le serveur les transmet ensuite au module de notifications (push + e-mail).
 const event = (type, gameId, to, data = {}) => ({ type, gameId, to: [to].flat().filter(Boolean), data });
+// Événement destiné à l'organisateur (tous les comptes admin) : il peut, lui, contenir des noms.
+export const adminEvent = (type, gameId, data = {}) => ({ type, gameId, to: [], admins: true, data });
 const allPlayers = async (db, gameId) => (await db.query('SELECT id FROM players WHERE game_id = $1 ORDER BY id', [gameId])).map((p) => p.id);
 
 // ---------- Fonctions pures (tirage, validation) ----------
@@ -159,7 +161,10 @@ async function closeGame(db, gameId, winnerId) {
   const now = nowIso();
   await db.query(`UPDATE contracts SET status = 'void', closed_at = $1 WHERE game_id = $2 AND status IN ${OPEN}`, [now, gameId]);
   await db.query("UPDATE games SET status = 'finished', finished_at = $1, winner_id = $2 WHERE id = $3", [now, winnerId, gameId]);
-  return { events: [event('game_finished', gameId, await allPlayers(db, gameId), { winnerId })] };
+  const events = [event('game_finished', gameId, await allPlayers(db, gameId), { winnerId })];
+  // Victoire automatique (dernier survivant) : l'organisateur est prévenu. S'il arrête lui-même la partie, inutile.
+  if (winnerId) events.push(adminEvent('admin_game_finished', gameId, { winnerId }));
+  return { events };
 }
 
 // Fin de partie décidée par l'organisateur.
@@ -186,6 +191,8 @@ async function removeFromChain(db, gameId, victimId, { killerId = null, how, con
   );
 
   const events = [event(how === 'kill' ? 'you_were_killed' : 'you_were_removed', gameId, victimId)];
+  // Kill confirmé par la victime : l'organisateur ne l'a pas vu passer, on le prévient.
+  if (confirmedBy === 'target') events.push(adminEvent('admin_kill_confirmed', gameId, { killerId, victimId }));
   if (!inbound || !outbound) return { finished: false, events };
   const hunter = inbound.killer_id;
   const next = outbound.target_id;
@@ -213,8 +220,13 @@ export function declareKill(db, playerId) {
     const contract = await openContractOf(t, playerId);
     if (!contract) throw new GameError("Vous n'avez pas de cible actuellement.");
     if (contract.status === 'pending') throw new GameError('Kill déjà déclaré, en attente de confirmation.');
-    await t.query("UPDATE contracts SET status = 'pending', declared_at = $1 WHERE id = $2", [nowIso(), contract.id]);
-    return { events: [event('kill_declared', player.game_id, contract.target_id)] };
+    await t.query("UPDATE contracts SET status = 'pending', declared_at = $1, reminded_at = NULL WHERE id = $2", [nowIso(), contract.id]);
+    return {
+      events: [
+        event('kill_declared', player.game_id, contract.target_id),
+        adminEvent('admin_kill_declared', player.game_id, { killerId: playerId, victimId: contract.target_id }),
+      ],
+    };
   });
 }
 
@@ -242,7 +254,10 @@ export async function contestKill(db, contractId, by = 'target') {
   const contract = await contractById(db, contractId);
   if (!contract || contract.status !== 'pending') throw new GameError("Ce kill n'est plus en attente.");
   await db.query("UPDATE contracts SET status = 'active', declared_at = NULL, contested = contested + 1 WHERE id = $1", [contractId]);
-  return { events: [event(by === 'admin' ? 'kill_rejected' : 'kill_contested', contract.game_id, contract.killer_id)] };
+  const events = [event(by === 'admin' ? 'kill_rejected' : 'kill_contested', contract.game_id, contract.killer_id)];
+  // Contestation par la cible : c'est à l'organisateur de trancher.
+  if (by !== 'admin') events.push(adminEvent('admin_kill_contested', contract.game_id, { killerId: contract.killer_id, victimId: contract.target_id }));
+  return { events };
 }
 
 // Élimination administrative (abandon, triche...) : le chasseur hérite de la cible du joueur retiré.
@@ -265,6 +280,26 @@ export async function updateContractChallenge(db, contractId, text) {
   if (contract.challenge_text === clean) return { events: [] };
   await db.query('UPDATE contracts SET challenge_text = $1 WHERE id = $2', [clean, contractId]);
   return { events: [event('challenge_changed', contract.game_id, contract.killer_id)] };
+}
+
+// Rappel pour les kills déclarés depuis trop longtemps sans réponse (appelé régulièrement).
+// Chaque kill en attente ne donne lieu qu'à un seul rappel.
+export async function pendingKillReminders(db, { olderThanMs = 2 * 3600_000 } = {}) {
+  const limit = new Date(Date.now() - olderThanMs).toISOString();
+  const due = await db.query(
+    `UPDATE contracts c SET reminded_at = $1
+     FROM games g
+     WHERE g.id = c.game_id AND g.status = 'running' AND c.status = 'pending'
+       AND c.reminded_at IS NULL AND c.declared_at < $2
+     RETURNING c.*`,
+    [nowIso(), limit],
+  );
+  const events = [];
+  for (const c of due) {
+    events.push(event('kill_declared_reminder', c.game_id, c.target_id));
+    events.push(adminEvent('admin_kill_pending', c.game_id, { killerId: c.killer_id, victimId: c.target_id, since: c.declared_at }));
+  }
+  return { events };
 }
 
 // ---------- Vues ----------

@@ -98,6 +98,35 @@ CREATE TABLE IF NOT EXISTS push_subscriptions (
   created_at text NOT NULL DEFAULT ${NOW}
 );
 
+-- Messagerie : chaque message appartient au fil d'un joueur (échanges joueur ↔ organisateur).
+-- Un message de l'organisateur à plusieurs joueurs crée une ligne par destinataire (même broadcast_key).
+CREATE TABLE IF NOT EXISTS messages (
+  id            serial PRIMARY KEY,
+  game_id       integer NOT NULL REFERENCES games(id) ON DELETE CASCADE,
+  player_id     integer NOT NULL REFERENCES players(id) ON DELETE CASCADE,
+  direction     text NOT NULL CHECK (direction IN ('to_player', 'to_admin')),
+  body          text NOT NULL,
+  broadcast_key text,
+  audience      text,
+  created_at    text NOT NULL DEFAULT ${NOW},
+  read_at       text
+);
+CREATE INDEX IF NOT EXISTS idx_messages_player ON messages(player_id, id);
+CREATE INDEX IF NOT EXISTS idx_messages_game ON messages(game_id, id);
+
+-- Appareils de l'organisateur abonnés aux notifications push.
+CREATE TABLE IF NOT EXISTS admin_push_subscriptions (
+  id         serial PRIMARY KEY,
+  admin_id   integer NOT NULL REFERENCES admins(id) ON DELETE CASCADE,
+  endpoint   text NOT NULL UNIQUE,
+  keys_json  text NOT NULL,
+  created_at text NOT NULL DEFAULT ${NOW}
+);
+
+-- Colonnes ajoutées après la première version.
+ALTER TABLE admins ADD COLUMN IF NOT EXISTS email text NOT NULL DEFAULT '';
+ALTER TABLE contracts ADD COLUMN IF NOT EXISTS reminded_at text;
+
 CREATE TABLE IF NOT EXISTS settings (
   key   text PRIMARY KEY,
   value text NOT NULL
@@ -115,6 +144,8 @@ ALTER TABLE contracts ENABLE ROW LEVEL SECURITY;
 ALTER TABLE kills ENABLE ROW LEVEL SECURITY;
 ALTER TABLE push_subscriptions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE settings ENABLE ROW LEVEL SECURITY;
+ALTER TABLE messages ENABLE ROW LEVEL SECURITY;
+ALTER TABLE admin_push_subscriptions ENABLE ROW LEVEL SECURITY;
 `;
 
 export async function migrate(db) {

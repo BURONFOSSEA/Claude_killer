@@ -28,7 +28,7 @@ self.addEventListener('notificationclick', (event) => {
     self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((wins) => {
       const open = wins.find((w) => new URL(w.url).pathname === new URL(url).pathname);
       if (open) {
-        open.postMessage({ type: 'refresh' });
+        open.postMessage({ type: 'refresh', url });
         return open.focus();
       }
       return self.clients.openWindow(url);

@@ -4,7 +4,21 @@
 import webpush from 'web-push';
 import { getSetting, setSetting } from './db.js';
 
+const preview = (text, max = 140) => {
+  const t = String(text ?? '');
+  return t.length > max ? `${t.slice(0, max - 1)}…` : t;
+};
+
+// Messages destinés aux joueurs.
 const MESSAGES = {
+  message_received: (ctx) => ({
+    title: "💬 Message de l'organisateur",
+    body: preview(ctx.body),
+  }),
+  kill_declared_reminder: () => ({
+    title: '⏳ On attend ta réponse',
+    body: "Quelqu'un affirme toujours t'avoir éliminé : confirme ou conteste dans l'appli.",
+  }),
   game_started: (ctx) => ({
     title: `🔪 La partie « ${ctx.game} » commence !`,
     body: "Ta cible et ton défi t'attendent. Ouvre l'appli, discrètement…",
@@ -51,20 +65,48 @@ const MESSAGES = {
   }),
 };
 
+// Messages destinés à l'organisateur : lui a le droit de tout savoir.
+const ADMIN_MESSAGES = {
+  admin_kill_declared: (c) => ({
+    title: `⏳ Kill déclaré · ${c.game}`,
+    body: `${c.killer} affirme avoir éliminé ${c.victim}. En attente de confirmation.`,
+  }),
+  admin_kill_contested: (c) => ({
+    title: `✋ Kill contesté · ${c.game}`,
+    body: `${c.victim} conteste le kill de ${c.killer} : à vous de trancher.`,
+  }),
+  admin_kill_confirmed: (c) => ({
+    title: `💀 ${c.killer} a éliminé ${c.victim}`,
+    body: `Partie « ${c.game} » : kill confirmé par la victime.`,
+  }),
+  admin_kill_pending: (c) => ({
+    title: `⏰ Kill en attente · ${c.game}`,
+    body: `${c.killer} → ${c.victim} : la cible n'a toujours pas répondu. Vous pouvez valider ou refuser.`,
+  }),
+  admin_game_finished: (c) => ({
+    title: `🏆 Partie « ${c.game} » terminée`,
+    body: `Vainqueur : ${c.winner}.`,
+  }),
+  admin_message: (c) => ({
+    title: `💬 ${c.player} · ${c.game}`,
+    body: preview(c.body),
+  }),
+};
+
 export function messageFor(evt, ctx) {
-  const make = MESSAGES[evt.type];
+  const make = (evt.admins ? ADMIN_MESSAGES : MESSAGES)[evt.type];
   return make ? make(ctx) : null;
 }
 
 const ESC = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 const esc = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ESC[c]);
 
-function emailHtml({ title, body, url, playerName }) {
+function emailHtml({ title, body, url, greeting }) {
   return `<!doctype html><html lang="fr"><body style="margin:0;background:#0f0f12;font-family:Arial,sans-serif;color:#f1f1f4">
   <div style="max-width:480px;margin:0 auto;padding:32px 20px">
     <div style="font-size:28px;letter-spacing:3px;font-weight:bold">KILL<span style="color:#e5383b">ER</span></div>
     <div style="background:#18181d;border:1px solid #2e2e37;border-radius:14px;padding:24px;margin-top:20px">
-      <p style="margin:0 0 6px;color:#a2a2ad">Salut ${esc(playerName)},</p>
+      <p style="margin:0 0 6px;color:#a2a2ad">${esc(greeting)}</p>
       <h1 style="font-size:20px;margin:0 0 12px">${esc(title)}</h1>
       <p style="margin:0 0 20px;line-height:1.5">${esc(body)}</p>
       <a href="${esc(url)}" style="display:inline-block;background:#e5383b;color:#fff;text-decoration:none;font-weight:bold;padding:12px 20px;border-radius:10px">Ouvrir le jeu</a>
@@ -120,50 +162,75 @@ export async function createPush(db, env = {}) {
 // ---------- Distribution ----------
 
 export function createNotifier({ db, mailer = null, push = null, logger = console }) {
-  const player = (id) => db.one('SELECT id, name, email FROM players WHERE id = $1', [id]);
+  const name = async (id) => (id ? (await db.one('SELECT name FROM players WHERE id = $1', [id]))?.name ?? '?' : null);
 
-  async function sendPush(p, msg, url) {
+  // Envoie à tous les appareils abonnés ; les abonnements expirés sont supprimés.
+  async function sendPush(subscriptions, table, msg, url, tag) {
     if (!push) return;
-    const payload = JSON.stringify({ title: msg.title, body: msg.body, url, tag: `killer-${p.id}` });
-    for (const sub of await db.query('SELECT * FROM push_subscriptions WHERE player_id = $1', [p.id])) {
+    const payload = JSON.stringify({ title: msg.title, body: msg.body, url, tag });
+    for (const sub of subscriptions) {
       try {
         await push.send({ endpoint: sub.endpoint, keys: JSON.parse(sub.keys_json) }, payload);
       } catch (err) {
         // 404/410 : abonnement expiré ou révoqué par le navigateur → on l'oublie.
-        if (err.statusCode === 404 || err.statusCode === 410) await db.query('DELETE FROM push_subscriptions WHERE id = $1', [sub.id]);
-        else logger.error(`[push] joueur ${p.id} :`, err.message);
+        if (err.statusCode === 404 || err.statusCode === 410) await db.query(`DELETE FROM ${table} WHERE id = $1`, [sub.id]);
+        else logger.error('[push]', err.message);
       }
     }
   }
 
-  async function sendMail(p, msg, url) {
-    if (!mailer || !p.email) return;
+  async function sendMail(to, toName, greeting, msg, url) {
+    if (!mailer || !to) return;
     try {
       await mailer.send({
-        to: p.email,
-        toName: p.name,
+        to,
+        toName,
         subject: msg.title,
-        text: `Salut ${p.name},\n\n${msg.body}\n\nOuvrir le jeu : ${url}`,
-        html: emailHtml({ ...msg, url, playerName: p.name }),
+        text: `${greeting}\n\n${msg.body}\n\nOuvrir le jeu : ${url}`,
+        html: emailHtml({ ...msg, url, greeting }),
       });
     } catch (err) {
-      logger.error(`[mail] joueur ${p.id} :`, err.message);
+      logger.error('[mail]', err.message);
     }
   }
 
   async function dispatch(events = [], { siteUrl = '' } = {}) {
-    const url = `${siteUrl.replace(/\/$/, '')}/player.html`;
+    const site = siteUrl.replace(/\/$/, '');
     const jobs = [];
     for (const evt of events) {
-      const game = await db.one('SELECT name FROM games WHERE id = $1', [evt.gameId]);
+      const game = await db.one('SELECT id, name FROM games WHERE id = $1', [evt.gameId]);
       if (!game) continue;
-      const winner = evt.data?.winnerId ? (await player(evt.data.winnerId))?.name : null;
-      for (const playerId of evt.to) {
-        const p = await player(playerId);
-        if (!p) continue;
-        const msg = messageFor(evt, { game: game.name, winner, isWinner: evt.data?.winnerId === playerId });
+      const d = evt.data || {};
+      const ctx = {
+        game: game.name,
+        body: d.body,
+        winner: await name(d.winnerId),
+        killer: await name(d.killerId),
+        victim: await name(d.victimId),
+        player: await name(d.playerId),
+      };
+
+      if (evt.admins) {
+        const msg = messageFor(evt, ctx);
         if (!msg) continue;
-        jobs.push(sendPush(p, msg, url), sendMail(p, msg, url));
+        const url = `${site}/admin.html#/game/${game.id}/${evt.type === 'admin_message' ? 'messages' : 'live'}`;
+        for (const admin of await db.query('SELECT id, username, email FROM admins')) {
+          const subs = await db.query('SELECT * FROM admin_push_subscriptions WHERE admin_id = $1', [admin.id]);
+          jobs.push(sendPush(subs, 'admin_push_subscriptions', msg, url, `killer-admin-${game.id}-${evt.type}`));
+          jobs.push(sendMail(admin.email, admin.username, 'Bonjour,', msg, url));
+        }
+        continue;
+      }
+
+      const url = `${site}/player.html`;
+      for (const playerId of evt.to) {
+        const p = await db.one('SELECT id, name, email FROM players WHERE id = $1', [playerId]);
+        if (!p) continue;
+        const msg = messageFor(evt, { ...ctx, isWinner: d.winnerId === playerId });
+        if (!msg) continue;
+        const subs = await db.query('SELECT * FROM push_subscriptions WHERE player_id = $1', [p.id]);
+        jobs.push(sendPush(subs, 'push_subscriptions', msg, url, `killer-${p.id}-${evt.type}`));
+        jobs.push(sendMail(p.email, p.name, `Salut ${p.name},`, msg, url));
       }
     }
     await Promise.all(jobs);

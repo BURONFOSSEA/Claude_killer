@@ -25,12 +25,22 @@ import {
   finishGame,
   getGame,
   launchGame,
+  pendingKillReminders,
   playerView,
   savePlan,
   updateContractChallenge,
   validatePlan,
 } from './game.js';
 import { aiEnabled, generateChallenges, proposeAssignments } from './ai.js';
+import {
+  adminMessages,
+  adminUnreadByGame,
+  markThreadRead,
+  playerThread,
+  playerUnread,
+  sendAdminMessage,
+  sendPlayerMessage,
+} from './messages.js';
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 // Réponse "201 Created" : les autres routes renvoient simplement leur objet (200).
@@ -96,6 +106,23 @@ export function createHandler({ db, notifier, siteUrl = '', allowedOrigin = '*',
   // Toute modification des joueurs invalide la proposition d'attribution.
   const resetPlan = (t, gameId) => t.query('UPDATE games SET plan_json = NULL WHERE id = $1', [gameId]);
 
+  // Abonnement / désabonnement push d'un appareil (joueur ou organisateur).
+  async function subscribePush(table, ownerColumn, ownerId, sub = {}) {
+    const endpoint = str(sub.endpoint, 1000);
+    if (!/^https:\/\//.test(endpoint) || !sub.keys?.p256dh || !sub.keys?.auth) throw new GameError('Abonnement push invalide.');
+    const keys = JSON.stringify({ p256dh: str(sub.keys.p256dh, 200), auth: str(sub.keys.auth, 200) });
+    await db.query(
+      `INSERT INTO ${table} (${ownerColumn}, endpoint, keys_json) VALUES ($1, $2, $3)
+       ON CONFLICT (endpoint) DO UPDATE SET ${ownerColumn} = excluded.${ownerColumn}, keys_json = excluded.keys_json`,
+      [ownerId, endpoint, keys],
+    );
+    return { ok: true };
+  }
+  async function unsubscribePush(table, ownerColumn, ownerId, endpoint) {
+    await db.query(`DELETE FROM ${table} WHERE ${ownerColumn} = $1 AND endpoint = $2`, [ownerId, str(endpoint, 1000)]);
+    return { ok: true };
+  }
+
   // Envoie les notifications sans retarder la réponse.
   function notify(result) {
     if (!result?.events?.length) return;
@@ -105,6 +132,14 @@ export function createHandler({ db, notifier, siteUrl = '', allowedOrigin = '*',
   route('GET', '/health', null, async () => {
     await db.one('SELECT 1 AS ok'); // garde le projet Supabase actif
     return { ok: true };
+  });
+
+  // Rappels des kills restés sans réponse : appelé chaque heure par GitHub Actions.
+  // Sans authentification : l'appel est sans effet hors des rappels dus, et chacun n'est envoyé qu'une fois.
+  route('POST', '/cron/reminders', null, async () => {
+    const result = await pendingKillReminders(db);
+    notify(result);
+    return { reminders: result.events.filter((e) => e.admins).length };
   });
 
   route('GET', '/config', null, async () => ({ ai: aiEnabled(), push_key: notifier.pushPublicKey, mail: notifier.mailEnabled }));
@@ -141,9 +176,27 @@ export function createHandler({ db, notifier, siteUrl = '', allowedOrigin = '*',
     return { ok: true };
   });
 
+  // Préférences de notification de l'organisateur.
+  route('GET', '/admin/notifications', 'admin', async ({ subjectId }) => {
+    const row = await db.one('SELECT email FROM admins WHERE id = $1', [subjectId]);
+    const subs = await db.one('SELECT COUNT(*)::int AS n FROM admin_push_subscriptions WHERE admin_id = $1', [subjectId]);
+    return { email: row.email, push_devices: subs.n, push_key: notifier.pushPublicKey, mail_enabled: notifier.mailEnabled };
+  });
+  route('PUT', '/admin/email', 'admin', async ({ body, subjectId }) => {
+    await db.query('UPDATE admins SET email = $1 WHERE id = $2', [email(body.email), subjectId]);
+    return { ok: true };
+  });
+  route('POST', '/admin/push/subscribe', 'admin', ({ body, subjectId }) =>
+    subscribePush('admin_push_subscriptions', 'admin_id', subjectId, body.subscription),
+  );
+  route('POST', '/admin/push/unsubscribe', 'admin', ({ body, subjectId }) =>
+    unsubscribePush('admin_push_subscriptions', 'admin_id', subjectId, body.endpoint),
+  );
+
   // ---------------- Admin : parties ----------------
 
   route('GET', '/admin/games', 'admin', async () => ({
+    unread: await adminUnreadByGame(db),
     games: await db.query(
       `SELECT g.id, g.name, g.status, g.started_at, g.ends_at, g.finished_at, g.created_at,
               (SELECT COUNT(*)::int FROM players p WHERE p.game_id = g.id) AS players,
@@ -334,6 +387,28 @@ export function createHandler({ db, notifier, siteUrl = '', allowedOrigin = '*',
     return { ok: true };
   });
 
+  // ---------------- Admin : messagerie ----------------
+
+  route('GET', '/admin/games/:id/messages', 'admin', async ({ params }) => {
+    const gameId = (await getGame(db, id(params.id))).id;
+    return adminMessages(db, gameId);
+  });
+
+  route('POST', '/admin/games/:id/messages', 'admin', async ({ params, body }) => {
+    const result = await sendAdminMessage(db, id(params.id), {
+      body: body.body,
+      audience: str(body.audience, 20),
+      playerIds: Array.isArray(body.player_ids) ? body.player_ids : [],
+    });
+    notify(result);
+    return created({ sent: result.sent });
+  });
+
+  route('POST', '/admin/games/:id/messages/read', 'admin', async ({ params, body }) => {
+    await markThreadRead(db, id(params.id), id(body.player_id));
+    return { ok: true };
+  });
+
   // ---------------- Joueur ----------------
 
   route('POST', '/player/login', null, async ({ body, ip }) => {
@@ -352,7 +427,17 @@ export function createHandler({ db, notifier, siteUrl = '', allowedOrigin = '*',
     return { ok: true };
   });
 
-  route('GET', '/player/me', 'player', ({ subjectId }) => playerView(db, subjectId));
+  route('GET', '/player/me', 'player', async ({ subjectId }) => ({
+    ...(await playerView(db, subjectId)),
+    unread_messages: await playerUnread(db, subjectId),
+  }));
+
+  route('GET', '/player/messages', 'player', async ({ subjectId }) => ({ messages: await playerThread(db, subjectId) }));
+
+  route('POST', '/player/messages', 'player', async ({ body, subjectId }) => {
+    notify(await sendPlayerMessage(db, subjectId, body.body));
+    return created({ ok: true });
+  });
 
   route('POST', '/player/kill', 'player', async ({ subjectId }) => {
     notify(await declareKill(db, subjectId));
@@ -376,23 +461,12 @@ export function createHandler({ db, notifier, siteUrl = '', allowedOrigin = '*',
     return { ok: true };
   });
 
-  route('POST', '/player/push/subscribe', 'player', async ({ body, subjectId }) => {
-    const sub = body.subscription || {};
-    const endpoint = str(sub.endpoint, 1000);
-    if (!/^https:\/\//.test(endpoint) || !sub.keys?.p256dh || !sub.keys?.auth) throw new GameError('Abonnement push invalide.');
-    const keys = JSON.stringify({ p256dh: str(sub.keys.p256dh, 200), auth: str(sub.keys.auth, 200) });
-    await db.query(
-      `INSERT INTO push_subscriptions (player_id, endpoint, keys_json) VALUES ($1, $2, $3)
-       ON CONFLICT (endpoint) DO UPDATE SET player_id = excluded.player_id, keys_json = excluded.keys_json`,
-      [subjectId, endpoint, keys],
-    );
-    return { ok: true };
-  });
-
-  route('POST', '/player/push/unsubscribe', 'player', async ({ body, subjectId }) => {
-    await db.query('DELETE FROM push_subscriptions WHERE player_id = $1 AND endpoint = $2', [subjectId, str(body.endpoint, 1000)]);
-    return { ok: true };
-  });
+  route('POST', '/player/push/subscribe', 'player', ({ body, subjectId }) =>
+    subscribePush('push_subscriptions', 'player_id', subjectId, body.subscription),
+  );
+  route('POST', '/player/push/unsubscribe', 'player', ({ body, subjectId }) =>
+    unsubscribePush('push_subscriptions', 'player_id', subjectId, body.endpoint),
+  );
 
   // La victime répond à une déclaration de kill la concernant.
   async function incomingContract(playerId) {

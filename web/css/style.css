@@ -184,3 +184,19 @@ td input, td select { min-height: 36px; padding: 6px 8px; }
 .grid.pair { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .wrap.pt-0 { padding-top: 0; }
 #view { padding-bottom: 8px; }
+
+/* Messagerie */
+.chat { display: flex; flex-direction: column; gap: 8px; max-height: 380px; overflow-y: auto; padding: 2px; }
+.bubble { padding: 10px 12px; border-radius: 14px; max-width: 85%; background: var(--bg-elev-2); word-break: break-word; }
+.bubble .text { white-space: pre-wrap; }
+.bubble.me { align-self: flex-end; background: var(--accent-soft); border: 1px solid rgba(229,56,59,0.35); }
+.bubble.them { align-self: flex-start; }
+.bubble.unread { border: 1px solid var(--accent); }
+.bubble .meta { font-size: 0.75rem; color: var(--text-dim); margin-bottom: 2px; }
+.count { display: inline-flex; align-items: center; justify-content: center; min-width: 20px; height: 20px; padding: 0 6px;
+  border-radius: 999px; background: var(--accent); color: #fff; font-size: 0.72rem; font-weight: 700; margin-left: 6px; }
+.thread-list li { cursor: pointer; border-radius: 10px; padding: 10px 8px; }
+.thread-list li:hover, .thread-list li.active { background: var(--bg-elev-2); }
+.checks { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 6px; }
+.checks label { font-weight: 400; display: flex; gap: 8px; align-items: center; margin: 0; }
+.checks input { width: auto; min-height: 0; }

@@ -1,4 +1,5 @@
 import { api, esc, $, $$, toast, formatDate, formatDuration, ago, toLocalInput, STATUS_LABEL } from './common.js';
+import { createNotificationCard } from './push.js';
 
 let aiOn = false;
 let mailOn = false;
@@ -9,6 +10,9 @@ let planDirty = false;
 let planInfo = null; // { source, warning } de la dernière génération
 let suggestions = []; // défis proposés par l'IA, en attente de validation
 let busy = false;
+let inbox = { threads: {}, broadcasts: [] }; // messagerie de la partie ouverte
+let selectedThread = null; // joueur dont le fil est affiché
+let inboxTimer = null;
 
 // ---------------------------------------------------------------- navigation
 
@@ -19,6 +23,7 @@ function route() {
     return openGame(Number(gameId));
   }
   if (page === 'password') return renderPassword();
+  if (page === 'notifications') return renderNotificationSettings();
   current = null;
   return renderGames();
 }
@@ -56,13 +61,13 @@ const view = () => $('#view');
 // ---------------------------------------------------------------- liste des parties
 
 async function renderGames() {
-  const { games } = await api('/api/admin/games');
+  const { games, unread = {} } = await api('/api/admin/games');
   view().innerHTML = `
     <div class="row spread">
       <h1>Mes parties</h1>
       <div class="row">
         ${aiOn ? '<span class="badge ai">IA activée</span>' : '<span class="badge" title="Définissez ANTHROPIC_API_KEY côté serveur">IA désactivée</span>'}
-        ${mailOn ? '<span class="badge running">E-mails activés</span>' : '<span class="badge" title="Définissez SMTP_HOST côté serveur">E-mails désactivés</span>'}
+        ${mailOn ? '<span class="badge running">E-mails activés</span>' : '<span class="badge" title="Ajoutez les secrets BREVO_API_KEY et MAIL_FROM">E-mails désactivés</span>'}
       </div>
     </div>
     <div class="grid cols-2">
@@ -84,7 +89,8 @@ async function renderGames() {
                 .map(
                   (g) => `
           <a class="card btn block" href="#/game/${g.id}" style="display:block;text-align:left">
-            <div class="row spread"><strong>${esc(g.name)}</strong><span class="badge ${g.status}">${STATUS_LABEL[g.status]}</span></div>
+            <div class="row spread"><strong>${esc(g.name)}${unread[g.id] ? `<span class="count" title="Messages non lus">💬 ${unread[g.id]}</span>` : ''}</strong>
+              <span class="badge ${g.status}">${STATUS_LABEL[g.status]}</span></div>
             <div class="small dim">${g.players} joueur${g.players > 1 ? 's' : ''}${g.status === 'running' ? ` · ${g.alive} en vie` : ''}
               · ${g.started_at ? `lancée le ${esc(formatDate(g.started_at))}` : `créée le ${esc(formatDate(g.created_at))}`}</div>
           </a>`,
@@ -118,7 +124,8 @@ function localToIso(v) {
 async function openGame(id, { keepPlan = false } = {}) {
   try {
     const previousId = current?.game.id;
-    current = await api(`/api/admin/games/${id}`);
+    [current, inbox] = await Promise.all([api(`/api/admin/games/${id}`), api(`/api/admin/games/${id}/messages`)]);
+    if (previousId !== id) selectedThread = null;
     if (!keepPlan || previousId !== id) {
       draftPlan = current.plan ? planToOrder(current.plan) : null;
       planDirty = false;
@@ -144,6 +151,7 @@ function renderGame() {
     ['players', `Joueurs (${players.length})`],
     ['challenges', `Défis (${current.challenges.length})`],
     game.status === 'draft' ? ['plan', 'Attribution'] : ['live', game.status === 'running' ? 'Suivi en direct' : 'Bilan'],
+    ['messages', `Messages${unreadCount() ? ` (${unreadCount()})` : ''}`],
     ['settings', 'Réglages'],
   ];
   view().innerHTML = `
@@ -166,7 +174,176 @@ function renderGame() {
       <section id="tab"></section>
     </div>
     ${printableCodes()}`;
-  ({ players: renderPlayers, challenges: renderChallenges, plan: renderPlan, live: renderLive, settings: renderSettings })[tab]?.();
+  clearInterval(inboxTimer);
+  ({ players: renderPlayers, challenges: renderChallenges, plan: renderPlan, live: renderLive, messages: renderMessages, settings: renderSettings })[tab]?.();
+}
+
+// ---------------------------------------------------------------- onglet messages
+
+const unreadOf = (pid) => (inbox.threads[pid] || []).filter((m) => m.from === 'player' && !m.read).length;
+const unreadCount = () => Object.keys(inbox.threads).reduce((n, pid) => n + unreadOf(pid), 0);
+
+function renderMessages() {
+  const { players } = current;
+  tabEl().innerHTML = `
+    <form class="card" id="composeForm">
+      <h2>📣 Écrire aux joueurs</h2>
+      <div class="field">
+        <label for="audience">Destinataires</label>
+        <select id="audience">
+          <option value="all">Tous les joueurs (${players.length})</option>
+          <option value="alive">Les joueurs en vie (${players.filter((p) => p.status === 'alive').length})</option>
+          <option value="dead">Les joueurs éliminés (${players.filter((p) => p.status === 'dead').length})</option>
+          <option value="players">Choisir des joueurs…</option>
+        </select>
+      </div>
+      <div class="field hidden" id="pickPlayers">
+        <div class="checks">${players
+          .map((p) => `<label><input type="checkbox" value="${p.id}"> ${esc(p.name)}${p.status === 'dead' ? ' 💀' : ''}</label>`)
+          .join('')}</div>
+      </div>
+      <div class="field">
+        <label for="composeBody">Message</label>
+        <textarea id="composeBody" maxlength="1000" rows="3" placeholder="Rappel : la partie se termine dimanche à 18 h !" required></textarea>
+        <div class="hint">Chaque destinataire reçoit une notification (push et/ou e-mail) avec le début du message.</div>
+      </div>
+      <button class="primary" type="submit">Envoyer</button>
+    </form>
+    <div class="grid cols-2">
+      <div class="card">
+        <h2>💬 Conversations</h2>
+        <ul class="list thread-list" id="threadList"></ul>
+      </div>
+      <div class="card" id="threadPane"></div>
+    </div>
+    <div class="card" id="broadcastCard"></div>`;
+
+  $('#audience').addEventListener('change', (e) => $('#pickPlayers').classList.toggle('hidden', e.target.value !== 'players'));
+  $('#composeForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const audience = $('#audience').value;
+    const playerIds = $$('#pickPlayers input:checked').map((c) => Number(c.value));
+    await sendMessage({ body: $('#composeBody').value, audience, player_ids: playerIds }, () => ($('#composeBody').value = ''));
+  });
+  renderInbox();
+  // Rafraîchit les conversations toutes les 20 s tant que l'onglet est ouvert (sans toucher aux champs en cours de saisie).
+  inboxTimer = setInterval(() => !document.hidden && refreshInbox(), 20000);
+}
+
+async function sendMessage(body, onSuccess) {
+  try {
+    const { sent } = await api(`/api/admin/games/${current.game.id}/messages`, { method: 'POST', body });
+    toast(`Message envoyé à ${sent} joueur${sent > 1 ? 's' : ''}.`, 'success');
+    onSuccess?.();
+    await refreshInbox();
+  } catch (err) {
+    toast(err.message, 'error');
+  }
+}
+
+async function refreshInbox() {
+  if (!current || tab !== 'messages') return clearInterval(inboxTimer);
+  try {
+    inbox = await api(`/api/admin/games/${current.game.id}/messages`);
+    renderInbox();
+    const tabBtn = $('[data-tab="messages"]');
+    if (tabBtn) tabBtn.textContent = `Messages${unreadCount() ? ` (${unreadCount()})` : ''}`;
+  } catch (err) {
+    console.error(err);
+  }
+}
+
+function renderInbox() {
+  const last = (pid) => (inbox.threads[pid] || []).at(-1);
+  const players = [...current.players].sort(
+    (a, b) => unreadOf(b.id) - unreadOf(a.id) || (last(b.id)?.at || '').localeCompare(last(a.id)?.at || '') || a.name.localeCompare(b.name),
+  );
+  $('#threadList').innerHTML = players
+    .map((p) => {
+      const m = last(p.id);
+      return `<li data-thread="${p.id}" class="${selectedThread === p.id ? 'active' : ''}">
+        <div class="grow"><strong>${esc(p.name)}</strong>${p.status === 'dead' ? ' 💀' : ''}${unreadOf(p.id) ? `<span class="count">${unreadOf(p.id)}</span>` : ''}
+          <div class="small dim">${m ? `${m.from === 'player' ? '' : 'Vous : '}${esc(m.body.slice(0, 60))}` : 'Aucun message'}</div></div>
+        ${m ? `<span class="small dim">${esc(formatDate(m.at))}</span>` : ''}</li>`;
+    })
+    .join('');
+  renderThread();
+  const b = inbox.broadcasts;
+  $('#broadcastCard').innerHTML = `<h2>📜 Envois groupés</h2>${
+    b.length
+      ? `<ul class="list">${b
+          .map(
+            (x) => `<li><div class="grow">${esc(x.body)}<div class="small dim">À ${esc(x.audience)} · ${x.recipients} destinataire${
+              x.recipients > 1 ? 's' : ''
+            } · lu par ${x.read}</div></div><span class="small dim">${esc(formatDate(x.at))}</span></li>`,
+          )
+          .join('')}</ul>`
+      : '<p class="dim">Aucun envoi groupé.</p>'
+  }`;
+}
+
+function renderThread() {
+  const pane = $('#threadPane');
+  const player = current.players.find((p) => p.id === selectedThread);
+  if (!player) {
+    pane.innerHTML = '<p class="dim">Choisissez un joueur pour voir la conversation et lui répondre.</p>';
+    return;
+  }
+  const typed = $('#replyBody')?.value || '';
+  const messages = inbox.threads[player.id] || [];
+  pane.innerHTML = `
+    <h2>${esc(player.name)} ${player.status === 'dead' ? '<span class="badge dead">éliminé</span>' : ''}</h2>
+    <div class="chat" id="threadChat">${
+      messages.length
+        ? messages
+            .map(
+              (m) => `<div class="bubble ${m.from === 'admin' ? 'me' : 'them'}">
+                <div class="meta">${m.from === 'admin' ? `Vous${m.group ? ` · à ${esc(m.group)}` : ''}` : esc(player.name)} · ${esc(formatDate(m.at))}</div>
+                <div class="text">${esc(m.body)}</div></div>`,
+            )
+            .join('')
+        : '<p class="small dim">Aucun message échangé.</p>'
+    }</div>
+    <form id="replyForm" class="mt">
+      <textarea id="replyBody" maxlength="1000" rows="2" placeholder="Répondre à ${esc(player.name)}…" required></textarea>
+      <button class="primary mt" type="submit">Envoyer à ${esc(player.name)}</button>
+    </form>`;
+  $('#replyBody').value = typed;
+  const chat = $('#threadChat');
+  chat.scrollTop = chat.scrollHeight;
+  $('#replyForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    await sendMessage({ body: $('#replyBody').value, audience: 'players', player_ids: [player.id] }, () => ($('#replyBody').value = ''));
+  });
+}
+
+async function openThread(pid) {
+  selectedThread = pid;
+  if (unreadOf(pid)) {
+    await api(`/api/admin/games/${current.game.id}/messages/read`, { method: 'POST', body: { player_id: pid } }).catch(() => {});
+    for (const m of inbox.threads[pid] || []) if (m.from === 'player') m.read = true;
+    const tabBtn = $('[data-tab="messages"]');
+    if (tabBtn) tabBtn.textContent = `Messages${unreadCount() ? ` (${unreadCount()})` : ''}`;
+  }
+  renderInbox();
+}
+
+// ---------------------------------------------------------------- réglages des notifications de l'organisateur
+
+function renderNotificationSettings() {
+  current = null;
+  view().innerHTML = `
+    <div class="narrow">
+      <a href="#/" class="small dim">← Mes parties</a>
+      <h1>Notifications</h1>
+      <div id="adminNotif"></div>
+    </div>`;
+  createNotificationCard({
+    base: '/api/admin',
+    root: $('#adminNotif'),
+    intro: `Soyez prévenu quand un kill est déclaré, contesté ou confirmé, quand un kill attend depuis plus de 2 h,
+      quand un joueur vous écrit et quand une partie se termine. Activez-les sur chaque appareil (téléphone, ordinateur).`,
+  }).load();
 }
 
 function headerStats() {
@@ -684,6 +861,8 @@ document.addEventListener('click', async (e) => {
     renderGame();
     return;
   }
+  const thread = e.target.closest('[data-thread]');
+  if (thread) return openThread(Number(thread.dataset.thread));
   const el = e.target.closest('[data-action]');
   if (!el) return;
   const pid = el.closest('[data-player]')?.dataset.player;
@@ -693,6 +872,9 @@ document.addEventListener('click', async (e) => {
   switch (el.dataset.action) {
     case 'go-home':
       location.hash = '#/';
+      break;
+    case 'notifications':
+      location.hash = '#/notifications';
       break;
     case 'password':
       location.hash = '#/password';
@@ -811,5 +993,15 @@ document.addEventListener('click', async (e) => {
       break;
   }
 });
+
+// Clic sur une notification alors que la page est ouverte : on va à l'endroit concerné et on rafraîchit.
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.addEventListener('message', (e) => {
+    if (e.data?.type !== 'refresh') return;
+    const hash = e.data.url ? new URL(e.data.url).hash : '';
+    if (hash && hash !== location.hash) location.hash = hash;
+    else route();
+  });
+}
 
 boot();

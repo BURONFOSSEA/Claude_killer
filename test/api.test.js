@@ -14,13 +14,13 @@ const fakeNotifier = { pushPublicKey: 'cle-test', mailEnabled: true, dispatch: a
 const handle = createHandler({ db, notifier: fakeNotifier, allowedOrigin: 'https://moi.github.io' });
 
 // Mini-client gardant son jeton de session, comme le navigateur.
-function client() {
+function client(ip = '1.2.3.4') {
   let token = '';
   return async (path, { method = 'GET', body } = {}) => {
     const res = await handle(
       new Request(`https://x.supabase.co/functions/v1/api${path}`, {
         method,
-        headers: { 'content-type': 'application/json', 'x-forwarded-for': '1.2.3.4', ...(token && { [TOKEN_HEADER]: token }) },
+        headers: { 'content-type': 'application/json', 'x-forwarded-for': ip, ...(token && { [TOKEN_HEADER]: token }) },
         body: method === 'GET' ? undefined : JSON.stringify(body ?? {}),
       }),
     );
@@ -94,7 +94,8 @@ test('parcours complet d’une partie', async () => {
   assert.equal((await killer('/player/push/subscribe', { method: 'POST', body: { subscription: { endpoint: 'http://x' } } })).status, 400);
 
   await killer('/player/kill', { method: 'POST' });
-  assert.deepEqual(dispatched.at(-1), { type: 'kill_declared', gameId: game.id, to: [first.target_id], data: {} });
+  assert.deepEqual(dispatched.at(-2), { type: 'kill_declared', gameId: game.id, to: [first.target_id], data: {} });
+  assert.equal(dispatched.at(-1).type, 'admin_kill_declared');
   assert.ok((await victim('/player/me')).data.incoming);
   assert.equal((await victim('/player/incoming/confirm', { method: 'POST' })).status, 200);
   assert.equal((await victim('/player/me')).data.me.status, 'dead');
@@ -106,7 +107,7 @@ test('parcours complet d’une partie', async () => {
   const { data: final } = await killer('/player/me');
   assert.equal(final.game.status, 'finished');
   assert.equal(final.final.winner, kView.me.name);
-  assert.equal(dispatched.at(-1).type, 'game_finished');
+  assert.deepEqual(dispatched.slice(-2).map((e) => e.type), ['game_finished', 'admin_game_finished']);
 
   // Déconnexion : le jeton n'est plus valable
   await killer('/player/logout', { method: 'POST' });
@@ -114,7 +115,7 @@ test('parcours complet d’une partie', async () => {
 });
 
 test('trop de tentatives de connexion → 429', async () => {
-  const c = client();
+  const c = client('9.9.9.9');
   for (let i = 0; i < 10; i++) await c('/player/login', { method: 'POST', body: { code: 'NOPE' + i } });
   assert.equal((await c('/player/login', { method: 'POST', body: { code: 'NOPE' } })).status, 429);
 });
@@ -124,4 +125,78 @@ test('pré-vol CORS et routes inconnues', async () => {
   assert.equal(res.status, 204);
   assert.match(res.headers.get('access-control-allow-headers'), new RegExp(TOKEN_HEADER));
   assert.equal((await client()('/inconnue')).status, 404);
+});
+
+test('messagerie : organisateur → groupes de joueurs, joueur → organisateur uniquement', async () => {
+  const admin = client();
+  await admin('/admin/login', { method: 'POST', body: { username: 'admin', password: 'secret-pass' } });
+  const { data: game } = await admin('/admin/games', { method: 'POST', body: { name: 'Messages' } });
+  await admin(`/admin/games/${game.id}/players`, { method: 'POST', body: { players: ['Ana', 'Ben', 'Cyd', 'Dan'].map((name) => ({ name })) } });
+  await admin(`/admin/games/${game.id}/challenges`, { method: 'POST', body: { texts: ['a', 'b'] } });
+  await admin(`/admin/games/${game.id}/plan/random`, { method: 'POST' });
+  await admin(`/admin/games/${game.id}/launch`, { method: 'POST' });
+  let { data: state } = await admin(`/admin/games/${game.id}`);
+  const byName = Object.fromEntries(state.players.map((p) => [p.name, p]));
+  const clients = {};
+  for (const p of state.players) {
+    clients[p.name] = client();
+    await clients[p.name]('/player/login', { method: 'POST', body: { code: p.code } });
+  }
+  // Dan est retiré de la partie
+  await admin(`/admin/players/${byName.Dan.id}/eliminate`, { method: 'POST' });
+
+  const send = (body) => admin(`/admin/games/${game.id}/messages`, { method: 'POST', body });
+  assert.equal((await send({ body: 'Bonjour à tous', audience: 'all' })).data.sent, 4);
+  assert.equal((await send({ body: 'Courage les vivants', audience: 'alive' })).data.sent, 3);
+  assert.equal((await send({ body: 'Merci les morts', audience: 'dead' })).data.sent, 1);
+  assert.equal((await send({ body: 'Psst Ana', audience: 'players', player_ids: [byName.Ana.id] })).data.sent, 1);
+  assert.equal((await send({ body: 'x', audience: 'players', player_ids: [] })).status, 400);
+  assert.equal((await send({ body: '   ', audience: 'all' })).status, 400);
+  assert.equal(dispatched.at(-1).type, 'message_received');
+  assert.deepEqual(dispatched.at(-1).to, [byName.Ana.id]);
+
+  // Ce que chacun reçoit
+  assert.equal((await clients.Ana('/player/me')).data.unread_messages, 3);
+  const ana = (await clients.Ana('/player/messages')).data.messages.map((m) => m.body);
+  assert.deepEqual(ana, ['Bonjour à tous', 'Courage les vivants', 'Psst Ana']);
+  assert.equal((await clients.Ana('/player/me')).data.unread_messages, 0); // lus à l'ouverture
+  const dan = (await clients.Dan('/player/messages')).data.messages.map((m) => m.body);
+  assert.deepEqual(dan, ['Bonjour à tous', 'Merci les morts']);
+  const ben = (await clients.Ben('/player/messages')).data.messages;
+  assert.ok(!ben.some((m) => m.body === 'Psst Ana'));
+
+  // Un joueur n'écrit qu'à l'organisateur (aucun destinataire possible)
+  assert.equal((await clients.Ben('/player/messages', { method: 'POST', body: { body: 'Question pour l’orga', to: byName.Ana.id } })).status, 201);
+  assert.deepEqual(dispatched.at(-1), { type: 'admin_message', gameId: game.id, to: [], admins: true, data: { playerId: byName.Ben.id, body: 'Question pour l’orga' } });
+  assert.ok(!(await clients.Ana('/player/messages')).data.messages.some((m) => m.body.includes('Question')));
+
+  // Vue organisateur : fils par joueur, non-lus, envois groupés
+  assert.equal((await admin('/admin/games')).data.unread[game.id], 1);
+  const { data: box } = await admin(`/admin/games/${game.id}/messages`);
+  assert.equal(box.threads[byName.Ben.id].at(-1).from, 'player');
+  assert.equal(box.broadcasts.length, 3);
+  await admin(`/admin/games/${game.id}/messages/read`, { method: 'POST', body: { player_id: byName.Ben.id } });
+  assert.equal((await admin('/admin/games')).data.unread[game.id], undefined);
+
+  // Un joueur ne peut pas lire la messagerie d'une partie
+  assert.equal((await clients.Ben(`/admin/games/${game.id}/messages`)).status, 401);
+});
+
+test("préférences de notification de l'organisateur", async () => {
+  const admin = client();
+  await admin('/admin/login', { method: 'POST', body: { username: 'admin', password: 'secret-pass' } });
+  assert.equal((await admin('/admin/email', { method: 'PUT', body: { email: 'faux' } })).status, 400);
+  await admin('/admin/email', { method: 'PUT', body: { email: 'orga@ex.fr' } });
+  await admin('/admin/push/subscribe', { method: 'POST', body: { subscription: { endpoint: 'https://push.example/orga', keys: { p256dh: 'k', auth: 'a' } } } });
+  const { data } = await admin('/admin/notifications');
+  assert.equal(data.email, 'orga@ex.fr');
+  assert.equal(data.push_devices, 1);
+  await admin('/admin/push/unsubscribe', { method: 'POST', body: { endpoint: 'https://push.example/orga' } });
+  assert.equal((await admin('/admin/notifications')).data.push_devices, 0);
+});
+
+test('les rappels sont déclenchables sans connexion', async () => {
+  const res = await client()('/cron/reminders', { method: 'POST' });
+  assert.equal(res.status, 200);
+  assert.equal(typeof res.data.reminders, 'number');
 });
